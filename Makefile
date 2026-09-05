@@ -44,6 +44,12 @@ CV610_CC_SUBMAKE := $(if $(findstring /,$(CV610_CC)),$(abspath $(CV610_CC)),$(CV
 # when it does not.  A craft without it boots normally; the import warns and
 # no-ops.  Override with CV610_PQ_LIB=/path/to/libbin.so.
 CV610_PQ_LIB ?= ../hisilicon/vendor/pq/libbin.so
+# Which physical sensor the cv610 backend is compiled for. One sensor per
+# binary, selected at build time (no runtime dlopen-by-config-index) — same
+# principle as SOC_BUILD itself. Selects a sensor-specific mode table
+# (src/cv610_modes_$(CV610_SENSOR_PLUGIN).c), the matching plugin directory
+# under sensors/cv610/, and the SNS_* -D defines below.
+CV610_SENSOR_PLUGIN ?= imx662
 
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
@@ -88,6 +94,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/cv610_iq.c \
 	src/cv610_modes.c \
 	src/cv610_pq_bin.c \
+	src/cv610_modes_$(CV610_SENSOR_PLUGIN).c \
 	src/cv610_jpeg.c \
 	src/cv610_pipeline.c src/cv610_validation.c src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
@@ -168,6 +175,38 @@ SOC_CFLAGS := -I$(CV610_SDK_INC)/kernel/include/hi3516cv6xx \
 	-I$(CV610_SDK_INC)/libraries/isp/include/hi3516cv6xx/ext_inc
 SOC_DEFS := -DPLATFORM_CV610 -DHAVE_BACKEND_CV610=1 \
 	-DHAVE_CV610_HTTP_API=1
+# Sensor-specific values cv610_pipeline.c / cv610_runtime.c pick up via
+# #ifndef-guarded fallbacks. SNS_ID must match the plugin's own sensor-id
+# macro (os02k10_cmos.h / imx662_cmos_param.h) — the ISP framework binds
+# by that numeric id, not by name.
+ifeq ($(CV610_SENSOR_PLUGIN),os02k10)
+# Ascent wires OS02K10 to combo device 1 on the MIPI PHY's 2+2-lane split,
+# physical lanes {1,3} — confirmed against the stock Ascent firmware's
+# /proc/umap/mipi_rx (port_id=1, lane_mode=2+2, lane_id=1,3,-1,-1). Not the
+# IMX662 bring-up board's plain 4-lane/combo-0/lanes-{0,1} wiring.
+SOC_DEFS += -DSNS_LIB_PATH='"/usr/lib/sensors/libsns_os02k10.so"' \
+	-DSNS_OBJ_SYMBOL='"g_sns_os02k10_obj"' -DSNS_ID=210 \
+	-DSNS_LANES=2 -DSNS_BAYER=0 -DSNS_DATA_RATE_X2=0 \
+	-DSNS_LANE_OFFSET=1 -DSNS_LANE_STRIDE=2 -DSNS_MIPI_DEV=1 \
+	-DSNS_LANE_DIVIDE_MODE=LANE_DIVIDE_MODE_1 \
+	-DSNS_VI_DEV=1 -DSNS_VI_VPSS_MODE=OT_VI_ONLINE_VPSS_ONLINE \
+	-DSNS_VI_ONLINE_FUSION_GRP=1 \
+	-DSNS_VI_COMP_MASK0=0xFFF00000 -DSNS_VI_DATA_SEQ=OT_VI_DATA_SEQ_YVYU \
+	-DSNS_VPSS_GRP_RATE_MATCH=1 -DSNS_VPSS_CROP_ALWAYS_SET=0 \
+	-DSNS_VI_ONLINE_CLOCK_HZ=0 -DSNS_VI_VPSS_EARLY_END=1 \
+	-DSNS_VENC_CHN=1 -DSNS_VENC_BY_FRAME=0 -DSNS_VENC_POLL_NOT_SELECT=1 \
+	-DSNS_VENC_FORCE_IDR=1
+else ifeq ($(CV610_SENSOR_PLUGIN),imx662)
+SOC_DEFS += -DSNS_LIB_PATH='"/usr/lib/sensors/libsns_imx662.so"' \
+	-DSNS_OBJ_SYMBOL='"g_sns_imx662_obj"' -DSNS_ID=662 \
+	-DSNS_LANES=4 -DSNS_BAYER=0 -DSNS_DATA_RATE_X2=0
+else
+$(error Unsupported CV610_SENSOR_PLUGIN '$(CV610_SENSOR_PLUGIN)'; expected 'imx662' or 'os02k10')
+endif
+# Keyed on the sensor plugin (not just SOC_BUILD) so switching
+# CV610_SENSOR_PLUGIN always relinks fresh objects instead of silently
+# reusing ones built with the other sensor's -D values.
+OBJ_DIR := $(OUT_DIR)/obj-$(CV610_SENSOR_PLUGIN)
 SOC_LDFLAGS := -Wl,--allow-shlib-undefined
 SOC_LIBS := -lss_mpi -lss_mpi_isp -lss_mpi_ae -lss_mpi_awb \
 	-lot_mpi_isp -lss_mpi_sysmem -lss_mpi_sysbind \
@@ -197,6 +236,7 @@ help:
 	@echo "  make build       Build standalone binaries (default, SOC_BUILD=star6e)"
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make build SOC_BUILD=cv610 CV610_CC=... CV610_SDK_INC=... CV610_SDK_LIB=..."
+	@echo "  make build SOC_BUILD=cv610 CV610_SENSOR_PLUGIN=os02k10 ...  (default: imx662)"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
 	@echo "  make unix-dgram-consumer Build the target-local unix:// RTP test consumer"
@@ -213,7 +253,7 @@ help:
 	@echo "  make toolchain-maruko Ensure Maruko cross-toolchain is present"
 	@echo "  make toolchain-cv610 Ensure CV610 cross-toolchain is present"
 	@echo "  make cv610-sdk Validate the external CV610 compiler, headers, and libraries"
-	@echo "  make sensor-cv610 Build the CV610 IMX662 userspace sensor plugin"
+	@echo "  make sensor-cv610 CV610_SENSOR_PLUGIN=imx662|os02k10  Build the CV610 userspace sensor plugin"
 	@echo "  make ksrc-maruko KSRC_MARUKO=/path/to/kernel  Validate Infinity6C kernel source tree"
 	@echo "  make drivers-maruko KSRC_MARUKO=/path/to/kernel  Build sensors/maruko/sensor_imx*_maruko.ko"
 	@echo "  make ksrc-star6e KSRC_STAR6E=/path/to/kernel  Validate Infinity6E 4.9.84 kernel source tree"
@@ -388,10 +428,10 @@ stage: build qr-decode
 		fi; \
 	fi
 	@set -e; if [ "$(SOC_BUILD)" = "cv610" ]; then \
-		$(MAKE) sensor-cv610 SOC_BUILD=cv610 \
+		$(MAKE) sensor-cv610 SOC_BUILD=cv610 CV610_SENSOR_PLUGIN=$(CV610_SENSOR_PLUGIN) \
 			CV610_CC="$(CV610_CC)" CV610_SDK_INC="$(CV610_SDK_INC)"; \
 		mkdir -p $(OUT_DIR)/sensors; \
-		cp -f sensors/cv610/imx662/libsns_imx662.so $(OUT_DIR)/sensors/; \
+		cp -f sensors/cv610/$(CV610_SENSOR_PLUGIN)/libsns_$(CV610_SENSOR_PLUGIN).so $(OUT_DIR)/sensors/; \
 		cp -f config/waybeam.default.cv610.json $(OUT_DIR)/waybeam.json; \
 		cp -f init.d/S95waybeam.cv610 $(OUT_DIR)/S95waybeam; \
 		chmod +x $(OUT_DIR)/S95waybeam; \
@@ -590,7 +630,7 @@ cv610-sdk: toolchain-cv610
 	}
 
 sensor-cv610: cv610-sdk
-	$(MAKE) -C sensors/cv610/imx662 \
+	$(MAKE) -C sensors/cv610/$(CV610_SENSOR_PLUGIN) \
 		CV610_CC="$(CV610_CC_SUBMAKE)" CV610_SDK_INC="$(abspath $(CV610_SDK_INC))"
 
 # ── Maruko drivers ────────────────────────────────────────────────────
@@ -739,3 +779,4 @@ clean:
 	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc
 	$(MAKE) -C sensors/cv610/imx662 clean
+	$(MAKE) -C sensors/cv610/os02k10 clean

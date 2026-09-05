@@ -47,9 +47,38 @@
 
 #define CV610_VPSS_GRP 0
 #define CV610_VPSS_CHN 0
-#define CV610_VENC_CHN 0
+/* IMX662's bring-up board runs its H.265 channel at VENC chn 0; the stock
+ * Ascent firmware uses chn 1 instead (confirmed via /proc/umap/venc — its
+ * only populated H265 channel row is id=1, not 0). Whether chn 0 is simply
+ * reserved/unusable for encode output on this particular chip stepping or
+ * just an arbitrary vendor choice is unconfirmed, but chn 0 is where our
+ * own encode never signals output-ready despite the hardware genuinely
+ * encoding (VEDU_0/chnl scheduler interrupt_num climbing) — matching
+ * enough of a symptom to try the stock value. Set by the Makefile's
+ * CV610_SENSOR_PLUGIN as -DSNS_VENC_CHN; this fallback only fires if
+ * compiled outside that Makefile path. */
+#ifndef SNS_VENC_CHN
+#define SNS_VENC_CHN 0
+#endif
+#define CV610_VENC_CHN SNS_VENC_CHN
 #define CV610_FRAME_RING_SLOTS 8
 #define CV610_FRAME_RING_BYTES (512u * 1024u)
+
+/* Sensor-specific MIPI wiring: set by the Makefile's CV610_SENSOR_PLUGIN
+ * (imx662 default, os02k10) as -D values; these fallbacks only fire if
+ * compiled outside that Makefile path. os02k10's bayer phase is unverified
+ * (no register in the recovered table was identified as a CFA/mirror-phase
+ * control) — 0 (the common RGGB default, and IMX662's own value) is a
+ * placeholder, not a measurement. */
+#ifndef SNS_LANES
+#define SNS_LANES 4
+#endif
+#ifndef SNS_BAYER
+#define SNS_BAYER 0
+#endif
+#ifndef SNS_DATA_RATE_X2
+#define SNS_DATA_RATE_X2 0
+#endif
 
 typedef struct {
 	VencConfig config;
@@ -1903,7 +1932,18 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	attr.venc_attr.buf_size =
 		((ctx->pipeline.out_width * ctx->pipeline.out_height * 3 / 4) + 63) & ~63u;
 	attr.venc_attr.profile = 0;
-	attr.venc_attr.is_by_frame = TD_TRUE;
+	/* IMX662's bring-up board runs by_frame=TRUE; the stock Ascent
+	 * firmware's own H265 channel shows by_frame=n in /proc/umap/venc,
+	 * paired with a real nonzero cur_packs — vs. our own by_frame=TRUE
+	 * channel, which never shows a nonzero cur_packs despite the encoder
+	 * hardware genuinely completing frames underneath it (VEDU_0 interrupt
+	 * count climbing). Set by the Makefile's CV610_SENSOR_PLUGIN as
+	 * -DSNS_VENC_BY_FRAME; this fallback only fires if compiled outside
+	 * that Makefile path. */
+#ifndef SNS_VENC_BY_FRAME
+#define SNS_VENC_BY_FRAME 1
+#endif
+	attr.venc_attr.is_by_frame = SNS_VENC_BY_FRAME ? TD_TRUE : TD_FALSE;
 	attr.venc_attr.pic_width = ctx->pipeline.out_width;
 	attr.venc_attr.pic_height = ctx->pipeline.out_height;
 	attr.venc_attr.h265_attr.rcn_ref_share_buf_en = TD_TRUE;
@@ -1985,6 +2025,18 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	if (ss_mpi_sys_bind(&source, &destination) != TD_SUCCESS)
 		return -1;
 	ctx->venc_bound = 1;
+
+	/* Force an IDR right after bind rather than waiting for NORMAL_P's
+	 * implicit auto-IDR-on-start: gets the receiver a keyframe immediately
+	 * instead of at the next natural GOP boundary. Set by the Makefile's
+	 * CV610_SENSOR_PLUGIN as -DSNS_VENC_FORCE_IDR; this fallback only
+	 * fires if compiled outside that Makefile path. */
+#ifndef SNS_VENC_FORCE_IDR
+#define SNS_VENC_FORCE_IDR 0
+#endif
+#if SNS_VENC_FORCE_IDR
+	(void)ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE);
+#endif
 
 	/* JPEG snapshot: a second consumer on the source the main channel just
 	 * bound, registered only now so it can never join a source that failed
@@ -2205,9 +2257,9 @@ static int cv610_prepare(void *opaque)
 		&ctx->pipeline.out_width, &ctx->pipeline.out_height);
 	ctx->pipeline.keep_aspect = cfg->isp.keep_aspect ? 1 : 0;
 	ctx->pipeline.fps = mode->fps;
-	ctx->pipeline.lanes = 4;
-	ctx->pipeline.data_rate_x2 = 0;
-	ctx->pipeline.bayer = 0;
+	ctx->pipeline.lanes = SNS_LANES;
+	ctx->pipeline.data_rate_x2 = SNS_DATA_RATE_X2;
+	ctx->pipeline.bayer = SNS_BAYER;
 	ctx->pipeline.mirror = cfg->image.mirror ? 1 : 0;
 	ctx->pipeline.flip = cfg->image.flip ? 1 : 0;
 	ctx->pipeline.raw_bit = (int)mode->raw_bit;
@@ -2480,6 +2532,27 @@ static int cv610_run(void *opaque)
 			}
 		}
 
+		/* Poll query_status directly rather than waiting on select(): the
+		 * vendor's own stream-retrieval path (uav_ar_venc_stream_get in the
+		 * stock Ascent firmware, decompiled) has exactly this fallback —
+		 * query_status in a tight loop with a short sleep between tries,
+		 * not gated on the fd's select() readiness. Set by the Makefile's
+		 * CV610_SENSOR_PLUGIN as -DSNS_VENC_POLL_NOT_SELECT; this fallback
+		 * only fires if compiled outside that Makefile path. */
+#ifndef SNS_VENC_POLL_NOT_SELECT
+#define SNS_VENC_POLL_NOT_SELECT 0
+#endif
+#if SNS_VENC_POLL_NOT_SELECT
+		(void)readfds;
+		(void)timeout;
+		(void)ready;
+		memset(&status, 0, sizeof(status));
+		ret = ss_mpi_venc_query_status(CV610_VENC_CHN, &status);
+		if (ret != TD_SUCCESS || status.cur_packs == 0) {
+			usleep(3000);
+			continue;
+		}
+#else
 		FD_ZERO(&readfds);
 		FD_SET(venc_fd, &readfds);
 		ready = select(venc_fd + 1, &readfds, NULL, NULL, &timeout);
@@ -2505,6 +2578,7 @@ static int cv610_run(void *opaque)
 		ret = ss_mpi_venc_query_status(CV610_VENC_CHN, &status);
 		if (ret != TD_SUCCESS || status.cur_packs == 0)
 			continue;
+#endif
 		memset(&stream, 0, sizeof(stream));
 		stream.pack = calloc(status.cur_packs, sizeof(*stream.pack));
 		if (!stream.pack)

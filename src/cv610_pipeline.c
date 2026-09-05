@@ -43,13 +43,46 @@
 #include "ss_mpi_awb.h"
 
 #define MIPI_DEV_NODE       "/dev/ot_mipi_rx"
+/* Which physical sensor this binary was built for — set by the Makefile's
+ * CV610_SENSOR_PLUGIN (imx662 default, os02k10) as quoted -D values;
+ * these fallbacks only fire if compiled outside that Makefile path.
+ * SNS_ID must match the plugin's own sensor-id macro (imx662's IMX662_ID /
+ * os02k10's OS02K10_ID) — the ISP framework binds by that numeric id. */
+#ifndef SNS_LIB_PATH
 #define SNS_LIB_PATH        "/usr/lib/sensors/libsns_imx662.so"
+#endif
+#ifndef SNS_OBJ_SYMBOL
 #define SNS_OBJ_SYMBOL      "g_sns_imx662_obj"
-/* Must match IMX662_ID in the sensor driver (imx662_cmos_param.h). */
-#define IMX662_SNS_ID       662
+#endif
+#ifndef SNS_ID
+#define SNS_ID              662
+#endif
 
-#define VI_DEV              0
+/* Which VI device the sensor's MIPI capture lands on. IMX662's bring-up
+ * board uses VI dev 0; the Ascent wires OS02K10 through MIPI combo device 1
+ * (see SNS_MIPI_DEV), which lands on VI dev 1 too — confirmed against the
+ * stock Ascent firmware's /proc/umap/vi (dev_id=1, the only one with a
+ * live vi_dev_detect_info and nonzero pipe int_cnt). Set by the Makefile's
+ * CV610_SENSOR_PLUGIN as -DSNS_VI_DEV; this fallback only fires if
+ * compiled outside that Makefile path. */
+#ifndef SNS_VI_DEV
+#define SNS_VI_DEV 0
+#endif
+#define VI_DEV              SNS_VI_DEV
 #define VI_PIPE             0
+/* Whether the VI->VPSS hand-off is a fully-online hardware pipe or needs
+ * the VPSS half driven offline (through the VB pool). IMX662's bring-up
+ * board uses the offline half (OT_VI_ONLINE_VPSS_OFFLINE); the Ascent
+ * needs the fully-online pipe (OT_VI_ONLINE_VPSS_ONLINE) — confirmed
+ * against the stock Ascent firmware's /proc/umap/vi (vi_vpss_mode
+ * pipe_id=0: vi_online_vpss_online, with a live pipe int_cnt; ours stayed
+ * vi_online_vpss_offline with int_cnt=0, i.e. VI never actually captured a
+ * frame). Set by the Makefile's CV610_SENSOR_PLUGIN as
+ * -DSNS_VI_VPSS_MODE; this fallback only fires if compiled outside that
+ * Makefile path. */
+#ifndef SNS_VI_VPSS_MODE
+#define SNS_VI_VPSS_MODE OT_VI_ONLINE_VPSS_OFFLINE
+#endif
 #define VI_CHN              0
 #define VPSS_GRP            0
 #define VPSS_CHN            0
@@ -167,13 +200,39 @@ static int sensor_clock_select(uint32_t hz, uint32_t fps)
 	return 0;
 }
 
+/* Which MIPI combo/PHY device the sensor is wired to. IMX662's bring-up
+ * board uses combo device 0; board-specific PCBs can wire the sensor to a
+ * different PHY/clock-lane grouping. Set by the Makefile's
+ * CV610_SENSOR_PLUGIN as -DSNS_MIPI_DEV; this fallback only fires if
+ * compiled outside that Makefile path. */
+#ifndef SNS_MIPI_DEV
+#define SNS_MIPI_DEV 0
+#endif
+
+/* Whether the MIPI PHY runs as one 4-lane link or is split into two
+ * independent 2-lane ports ("2+2"). The Ascent's OS02K10 combo device 1
+ * lives on the 2+2 split (see SNS_MIPI_DEV/SNS_LANE_OFFSET below); IMX662's
+ * bring-up board is a plain single 4-lane link. Set by the Makefile's
+ * CV610_SENSOR_PLUGIN as -DSNS_LANE_DIVIDE_MODE; this fallback only fires
+ * if compiled outside that Makefile path. */
+#ifndef SNS_LANE_DIVIDE_MODE
+#define SNS_LANE_DIVIDE_MODE LANE_DIVIDE_MODE_0
+#endif
+/* This SDK checkout's include/mipi.h is a different vendor fork than the
+ * one the kernel's own ot_mipi_rx.h was generated from, and is missing
+ * LANE_DIVIDE_MODE_1 entirely, even though the kernel enum has it at value
+ * 1 ("2lane+2lane"). Fill the gap rather than patch the vendored header. */
+#ifndef LANE_DIVIDE_MODE_1
+#define LANE_DIVIDE_MODE_1 ((lane_divide_mode_t)1)
+#endif
+
 static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 {
 	combo_dev_attr_t attr;
-	combo_dev_t      dev = 0;
+	combo_dev_t      dev = SNS_MIPI_DEV;
 	sns_clk_source_t clk = 0;
 	sns_rst_source_t rst = 0;
-	lane_divide_mode_t hs = LANE_DIVIDE_MODE_0;
+	lane_divide_mode_t hs = SNS_LANE_DIVIDE_MODE;
 	int fd, i;
 
 	memset(&attr, 0, sizeof(attr));
@@ -187,8 +246,25 @@ static int mipi_setup(const Cv610PipelineRuntimeConfig *c)
 	attr.mipi_attr.input_data_type =
 		(c->raw_bit == 10) ? DATA_TYPE_RAW_10BIT : DATA_TYPE_RAW_12BIT;
 	attr.mipi_attr.wdr_mode = OT_MIPI_WDR_MODE_NONE;
+	/* Which physical PHY lane a logical lane number maps to. IMX662's
+	 * bring-up board wires logical lane N to physical PHY lane N
+	 * (offset 0, stride 1); board-specific PCBs can differ. The Ascent's
+	 * OS02K10 sits on the 2+2 split's port 1, which only accepts physical
+	 * lanes {1,3} (odd lanes, stride 2) per the kernel's
+	 * mipi_rx_check_lane_valid() — confirmed against the stock Ascent
+	 * firmware's /proc/umap/mipi_rx (port_id=1, lane_id=1,3,-1,-1). Set by
+	 * the Makefile's CV610_SENSOR_PLUGIN as -DSNS_LANE_OFFSET/
+	 * -DSNS_LANE_STRIDE; these fallbacks only fire if compiled outside
+	 * that Makefile path. */
+#ifndef SNS_LANE_OFFSET
+#define SNS_LANE_OFFSET 0
+#endif
+#ifndef SNS_LANE_STRIDE
+#define SNS_LANE_STRIDE 1
+#endif
 	for (i = 0; i < MIPI_LANE_NUM; i++) {
-		attr.mipi_attr.lane_id[i] = (i < c->lanes) ? (short)i : (short)-1;
+		attr.mipi_attr.lane_id[i] = (i < c->lanes) ?
+			(short)(SNS_LANE_OFFSET + i * SNS_LANE_STRIDE) : (short)-1;
 	}
 
 	fd = open(MIPI_DEV_NODE, O_RDWR);
@@ -307,7 +383,7 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 		vi_vpss_mode.mode[i] = OT_VI_OFFLINE_VPSS_OFFLINE;
 	}
 	if (c->vi_online) {
-		vi_vpss_mode.mode[VI_PIPE] = OT_VI_ONLINE_VPSS_OFFLINE;
+		vi_vpss_mode.mode[VI_PIPE] = SNS_VI_VPSS_MODE;
 	}
 
 	set_ret = ss_mpi_vb_set_cfg(&vb);
@@ -348,7 +424,7 @@ static int sys_setup(const Cv610PipelineRuntimeConfig *c)
 		CV610_CHECK(ss_mpi_sys_set_vi_aiisp_mode(VI_PIPE, OT_VI_AIISP_MODE_DEFAULT));
 		memset(&vi_vpss_mode, 0, sizeof(vi_vpss_mode));
 		CV610_CHECK(ss_mpi_sys_get_vi_vpss_mode(&vi_vpss_mode));
-		if (vi_vpss_mode.mode[VI_PIPE] != OT_VI_ONLINE_VPSS_OFFLINE) {
+		if (vi_vpss_mode.mode[VI_PIPE] != SNS_VI_VPSS_MODE) {
 			fprintf(stderr, "FAIL VI pipe %d mode readback = %d\n", VI_PIPE,
 					vi_vpss_mode.mode[VI_PIPE]);
 			return -1;
@@ -375,17 +451,36 @@ static int vi_setup(const Cv610PipelineRuntimeConfig *c)
 	ss_mpi_vi_unbind(VI_DEV, VI_PIPE);
 	ss_mpi_vi_disable_dev(VI_DEV);
 
+	/* Which physical ADC/lane channels feed this VI device. IMX662's
+	 * bring-up board is VI dev 0 with 0xffc00000; the Ascent's VI dev 1
+	 * (see SNS_VI_DEV) wires up a wider/different channel set —
+	 * 0xfff00000, confirmed against the stock Ascent firmware's
+	 * /proc/umap/vi. Set by the Makefile's CV610_SENSOR_PLUGIN as
+	 * -DSNS_VI_COMP_MASK0; this fallback only fires if compiled outside
+	 * that Makefile path. */
+#ifndef SNS_VI_COMP_MASK0
+#define SNS_VI_COMP_MASK0 0xFFC00000
+#endif
+	/* YUYV vs YVYU: a per-board wiring/byte-packing choice for this field,
+	 * not a sensor-format one (data_type stays raw either way). The
+	 * Ascent's stock firmware uses YVYU on VI dev 1; IMX662's bring-up
+	 * board uses YUYV on dev 0. Set by the Makefile's CV610_SENSOR_PLUGIN
+	 * as -DSNS_VI_DATA_SEQ; this fallback only fires if compiled outside
+	 * that Makefile path. */
+#ifndef SNS_VI_DATA_SEQ
+#define SNS_VI_DATA_SEQ OT_VI_DATA_SEQ_YUYV
+#endif
 	memset(&dev_attr, 0, sizeof(dev_attr));
 	dev_attr.intf_mode          = OT_VI_INTF_MODE_MIPI;
 	dev_attr.work_mode          = OT_VI_WORK_MODE_MULTIPLEX_1;
-	dev_attr.component_mask[0]  = 0xFFC00000;
+	dev_attr.component_mask[0]  = SNS_VI_COMP_MASK0;
 	dev_attr.component_mask[1]  = 0x0;
 	dev_attr.scan_mode          = OT_VI_SCAN_PROGRESSIVE;
 	dev_attr.ad_chn_id[0]       = -1;
 	dev_attr.ad_chn_id[1]       = -1;
 	dev_attr.ad_chn_id[2]       = -1;
 	dev_attr.ad_chn_id[3]       = -1;
-	dev_attr.data_seq           = OT_VI_DATA_SEQ_YUYV;
+	dev_attr.data_seq           = SNS_VI_DATA_SEQ;
 	dev_attr.data_type          = OT_VI_DATA_TYPE_RAW;
 	dev_attr.data_reverse       = TD_FALSE;
 	dev_attr.in_size.width      = c->width;
@@ -395,6 +490,36 @@ static int vi_setup(const Cv610PipelineRuntimeConfig *c)
 	CV610_CHECK(ss_mpi_vi_set_dev_attr(VI_DEV, &dev_attr));
 	CV610_CHECK(ss_mpi_vi_enable_dev(VI_DEV));
 	CV610_CHECK(ss_mpi_vi_bind(VI_DEV, VI_PIPE));
+
+	/* The fully-online VI->VPSS pipe (SNS_VI_VPSS_MODE=
+	 * OT_VI_ONLINE_VPSS_ONLINE) needs this pipe named as a (trivial,
+	 * single-pipe, non-WDR) fusion group before the group can actually
+	 * receive frames online — without it, VPSS's own driver accepts every
+	 * frame ("start_suc") but then immediately faults it ("frame_err"),
+	 * confirmed on the bench: VI captured real frames (pipe int_cnt
+	 * incrementing) while VPSS's frame_err tracked start_suc 1:1. Stock
+	 * Ascent firmware always populates this table (grp 0, pipe 0,
+	 * wdr_mode=none, cache_line=full frame height) even in linear mode; the
+	 * IMX662 bring-up board's offline-VPSS path never needs it. Guarded by
+	 * SNS_VI_ONLINE_FUSION_GRP (a plain 0/1 flag, not a comparison against
+	 * SNS_VI_VPSS_MODE — that macro expands to a C enum constant, not a
+	 * preprocessor one, so it cannot be tested in #if) so IMX662 is
+	 * unaffected. */
+#ifndef SNS_VI_ONLINE_FUSION_GRP
+#define SNS_VI_ONLINE_FUSION_GRP 0
+#endif
+#if SNS_VI_ONLINE_FUSION_GRP
+	{
+		ot_vi_wdr_fusion_grp_attr fusion_attr;
+
+		memset(&fusion_attr, 0, sizeof(fusion_attr));
+		fusion_attr.wdr_mode    = OT_WDR_MODE_NONE;
+		fusion_attr.cache_line  = c->height;
+		fusion_attr.pipe_id[0]  = VI_PIPE;
+		fusion_attr.pipe_reverse = TD_FALSE;
+		CV610_CHECK(ss_mpi_vi_set_wdr_fusion_grp_attr(VI_PIPE, &fusion_attr));
+	}
+#endif
 
 	memset(&pipe_attr, 0, sizeof(pipe_attr));
 	pipe_attr.pipe_bypass_mode = OT_VI_PIPE_BYPASS_NONE;
@@ -409,6 +534,43 @@ static int vi_setup(const Cv610PipelineRuntimeConfig *c)
 	pipe_attr.frame_rate_ctrl.dst_frame_rate = OT_VI_INVALID_FRAME_RATE;
 
 	CV610_CHECK(ss_mpi_vi_create_pipe(VI_PIPE, &pipe_attr));
+
+	/* Ascent-specific low-latency online setup, decompiled from the stock
+	 * Ascent firmware's own do_init_vi_vpss() (ar_ldyhs_sky) — none of this
+	 * exists on IMX662's offline-bound bring-up path. Two pieces:
+	 *
+	 * 1. ss_mpi_vi_set_pipe_online_clock(): an explicit pixel-rate the
+	 *    online pipe measures itself against. Without it, /proc/umap/vi's
+	 *    "online clock info" pixel_rate never locks (stays "n/a") even
+	 *    though basic frame/line detection still works — confirmed on the
+	 *    bench, and confirmed as this board's real rate via the stock
+	 *    firmware's own live measurement (pixel_rate==effect_clock==
+	 *    264000000) before this fix was written.
+	 * 2. ss_mpi_vi_set_pipe_frame_interrupt_attr(EARLY_END, height-100):
+	 *    the stock firmware always sets this (and the matching VPSS-side
+	 *    call in vpss_setup()) even in linear/non-WDR mode; our own
+	 *    default (interrupt_type=START, early_line=0) is the SDK's plain
+	 *    default, not what this board's online pipe expects. */
+#ifndef SNS_VI_ONLINE_CLOCK_HZ
+#define SNS_VI_ONLINE_CLOCK_HZ 0
+#endif
+#if SNS_VI_ONLINE_CLOCK_HZ
+	CV610_CHECK(ss_mpi_vi_set_pipe_online_clock(VI_PIPE, SNS_VI_ONLINE_CLOCK_HZ));
+#endif
+#ifndef SNS_VI_VPSS_EARLY_END
+#define SNS_VI_VPSS_EARLY_END 0
+#endif
+#if SNS_VI_VPSS_EARLY_END
+	{
+		ot_frame_interrupt_attr int_attr;
+
+		memset(&int_attr, 0, sizeof(int_attr));
+		int_attr.interrupt_type = OT_FRAME_INTERRUPT_EARLY_END;
+		int_attr.early_line     = c->height - 100u;
+		CV610_CHECK(ss_mpi_vi_set_pipe_frame_interrupt_attr(VI_PIPE, &int_attr));
+	}
+#endif
+
 	/* The ISP's mem_init queries pipe size from VI, so the pipe must exist. */
 	CV610_CHECK(ss_mpi_vi_start_pipe(VI_PIPE));
 	return 0;
@@ -442,6 +604,26 @@ static int vi_start_chn(const Cv610PipelineRuntimeConfig *c)
 
 	CV610_CHECK(ss_mpi_vi_set_chn_attr(VI_PIPE, VI_CHN, &chn_attr));
 	CV610_CHECK(ss_mpi_vi_enable_chn(VI_PIPE, VI_CHN));
+
+#if SNS_VI_ONLINE_FUSION_GRP
+	/* 3DNR enable: also part of the stock firmware's low-latency online
+	 * setup bundle (same do_init_vi_vpss() decompile), reusing the fusion-
+	 * group flag since both are specific to this board's online path.
+	 * Must come after the channel is enabled above — right after
+	 * ss_mpi_vi_start_pipe() (tried first) gets OT_ERR_NOT_CFG
+	 * (0xa010800b), confirmed on the bench; the stock firmware's own call
+	 * order has it here too. */
+	{
+		ot_3dnr_attr nr_attr;
+
+		memset(&nr_attr, 0, sizeof(nr_attr));
+		nr_attr.enable         = TD_TRUE;
+		nr_attr.nr_type        = OT_NR_TYPE_VIDEO_NORM;
+		nr_attr.compress_mode  = OT_COMPRESS_MODE_NONE;
+		nr_attr.nr_motion_mode = OT_NR_MOTION_MODE_NORM;
+		CV610_CHECK(ss_mpi_vi_set_pipe_3dnr_attr(VI_PIPE, &nr_attr));
+	}
+#endif
 
 	/* isp_mem_init asks the VI kernel export vi_get_pipe_hdr_attr() for this
 	 * pipe's dynamic range.  On CV610 that export reads physical channel 0's
@@ -519,7 +701,7 @@ static int isp_setup(const Cv610PipelineRuntimeConfig *c)
 	/* Tell the ISP which registered 3A libs and which sensor this pipe uses;
 	 * without it isp_mem_init cannot resolve the sensor and fails NOT_CFG. */
 	memset(&bind, 0, sizeof(bind));
-	bind.sns_id  = IMX662_SNS_ID;
+	bind.sns_id  = SNS_ID;
 	bind.ae_lib  = g_ae_lib;
 	bind.awb_lib = g_awb_lib;
 	CV610_CHECK(ss_mpi_isp_set_bind_attr(VI_PIPE, &bind));
@@ -654,50 +836,44 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	ot_mpp_chn src;
 	ot_mpp_chn dst;
 
+	/* -1/-1 ("unlimited", no rate control) is what IMX662's offline-bound
+	 * group uses; the Ascent's fully-online group needs the real capture
+	 * rate here instead — confirmed against the stock Ascent firmware's
+	 * /proc/umap/vpss (grp attr1 src_rate/dst_rate=60, matching the
+	 * sensor's actual fps, vs -1/-1 on our first online-mode attempt,
+	 * which also had frame_err tracking start_suc 1:1 on every frame).
+	 * Set by the Makefile's CV610_SENSOR_PLUGIN as
+	 * -DSNS_VPSS_GRP_RATE_MATCH; this fallback only fires if compiled
+	 * outside that Makefile path. */
+#ifndef SNS_VPSS_GRP_RATE_MATCH
+#define SNS_VPSS_GRP_RATE_MATCH 0
+#endif
+	/* Same EARLY_END/height-100 interrupt scheme as vi_setup()'s VI-pipe
+	 * side (SNS_VI_VPSS_EARLY_END): the stock Ascent firmware's
+	 * do_init_vi_vpss() sets this on the VPSS group too, before
+	 * create_grp — matching /proc/umap/vpss's "frame interrupt attr"
+	 * (EARLY_END, 980 for a 1080-line frame) that our own offline-style
+	 * default (unset, shown as "-"/0) never reproduced. */
+#if SNS_VI_VPSS_EARLY_END
+	{
+		ot_frame_interrupt_attr int_attr;
+
+		memset(&int_attr, 0, sizeof(int_attr));
+		int_attr.interrupt_type = OT_FRAME_INTERRUPT_EARLY_END;
+		int_attr.early_line     = c->height - 100u;
+		CV610_CHECK(ss_mpi_vpss_set_grp_frame_interrupt_attr(VPSS_GRP, &int_attr));
+	}
+#endif
+
 	memset(&grp_attr, 0, sizeof(grp_attr));
 	grp_attr.max_width     = c->width;
 	grp_attr.max_height    = c->height;
 	grp_attr.pixel_format  = OT_PIXEL_FORMAT_YVU_SEMIPLANAR_420;
 	grp_attr.dynamic_range = OT_DYNAMIC_RANGE_SDR8;
 	grp_attr.dei_mode      = OT_VPSS_DEI_MODE_OFF;
-	grp_attr.frame_rate.src_frame_rate = -1;
-	grp_attr.frame_rate.dst_frame_rate = -1;
+	grp_attr.frame_rate.src_frame_rate = SNS_VPSS_GRP_RATE_MATCH ? (int)c->fps : -1;
+	grp_attr.frame_rate.dst_frame_rate = SNS_VPSS_GRP_RATE_MATCH ? (int)c->fps : -1;
 	CV610_CHECK(ss_mpi_vpss_create_grp(VPSS_GRP, &grp_attr));
-
-	/* Aspect: the channel below scales whatever the group hands it, so
-	 * without this a 4:3 video0.size out of a 16:9 capture is squashed
-	 * rather than framed.  Crop the group's input to the encoded aspect
-	 * first — the same centre-crop rule Star6E and Maruko apply through
-	 * pipeline_common_compute_precrop(), from the same shared function so
-	 * the three backends cannot drift.
-	 *
-	 * Written UNCONDITIONALLY, including the disable.  MPP objects are
-	 * kernel state on this SoC and a group that outlives a teardown keeps
-	 * whatever crop it was last given, so "skip the call when no crop is
-	 * needed" would inherit a stale rectangle from the previous run's
-	 * geometry.  vpss_teardown() destroys the group precisely so that
-	 * cannot happen today — this keeps it true without depending on it. */
-	{
-		PipelinePrecropRect precrop = pipeline_common_compute_precrop(
-			c->width, c->height, c->out_width, c->out_height,
-			c->keep_aspect ? true : false);
-		int cropping = (precrop.w != c->width || precrop.h != c->height);
-		ot_vpss_crop_info crop;
-
-		memset(&crop, 0, sizeof(crop));
-		crop.enable = cropping ? TD_TRUE : TD_FALSE;
-		crop.crop_mode = OT_COORD_ABS;
-		crop.crop_rect.x = precrop.x;
-		crop.crop_rect.y = precrop.y;
-		crop.crop_rect.width = precrop.w;
-		crop.crop_rect.height = precrop.h;
-		CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
-		if (cropping)
-			printf("  ok  aspect crop %ux%u+%u+%u of %ux%u -> %ux%u\n",
-				(unsigned)precrop.w, (unsigned)precrop.h,
-				(unsigned)precrop.x, (unsigned)precrop.y,
-				c->width, c->height, c->out_width, c->out_height);
-	}
 
 	memset(&chn_attr, 0, sizeof(chn_attr));
 	chn_attr.width         = c->out_width;
@@ -721,6 +897,23 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	CV610_CHECK(ss_mpi_vpss_enable_chn(VPSS_GRP, VPSS_CHN));
 	CV610_CHECK(ss_mpi_vpss_start_grp(VPSS_GRP));
 
+	/* Same stock-firmware low-latency online bundle as the EARLY_END
+	 * interrupt attrs above: matches /proc/umap/vpss's "chn low delay
+	 * attr" (enable:Y, line_cnt:128) that our setup never reproduced
+	 * without it. Reuses SNS_VI_VPSS_EARLY_END rather than a new flag —
+	 * both are the same stock do_init_vi_vpss() online-mode bundle. */
+#if SNS_VI_VPSS_EARLY_END
+	{
+		ot_low_delay_info low_delay;
+
+		memset(&low_delay, 0, sizeof(low_delay));
+		low_delay.enable     = TD_TRUE;
+		low_delay.line_cnt   = 128u;
+		low_delay.one_buf_en = TD_FALSE;
+		CV610_CHECK(ss_mpi_vpss_set_chn_low_delay(VPSS_GRP, VPSS_CHN, &low_delay));
+	}
+#endif
+
 	src.mod_id = OT_ID_VI;
 	src.dev_id = VI_PIPE;
 	src.chn_id = VI_CHN;
@@ -728,6 +921,61 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	dst.dev_id = VPSS_GRP;
 	dst.chn_id = 0;
 	CV610_CHECK(ss_mpi_sys_bind(&src, &dst));
+
+	/* Aspect: the channel above scales whatever the group hands it, so
+	 * without this a 4:3 video0.size out of a 16:9 capture is squashed
+	 * rather than framed.  Crop the group's input to the encoded aspect
+	 * first — the same centre-crop rule Star6E and Maruko apply through
+	 * pipeline_common_compute_precrop(), from the same shared function so
+	 * the three backends cannot drift.
+	 *
+	 * Written UNCONDITIONALLY, including the disable, on boards whose VPSS
+	 * group is bound offline (SNS_VPSS_CROP_ALWAYS_SET, the default): MPP
+	 * objects are kernel state on this SoC and a group that outlives a
+	 * teardown keeps whatever crop it was last given, so "skip the call
+	 * when no crop is needed" would inherit a stale rectangle from the
+	 * previous run's geometry.  vpss_teardown() destroys the group
+	 * precisely so that cannot happen today — this keeps it true without
+	 * depending on it.
+	 *
+	 * The Ascent's online-bound VPSS group (SNS_VI_VPSS_MODE=
+	 * OT_VI_ONLINE_VPSS_ONLINE) rejects this ioctl outright with
+	 * OT_ERR_ILLEGAL_PARAM whenever it is the disable case — tried before
+	 * and after ss_mpi_sys_bind, and with both a full-frame and an
+	 * all-zero crop_rect; all four combinations were rejected identically,
+	 * so this looks like the online group simply refusing the call
+	 * outright rather than validating specific field values. Skipping the
+	 * call when no crop is actually needed sidesteps that without
+	 * touching the aspect-crop feature itself, which this board's single
+	 * native mode never exercises anyway. Set by the Makefile's
+	 * CV610_SENSOR_PLUGIN as -DSNS_VPSS_CROP_ALWAYS_SET; this fallback
+	 * only fires if compiled outside that Makefile path. */
+#ifndef SNS_VPSS_CROP_ALWAYS_SET
+#define SNS_VPSS_CROP_ALWAYS_SET 1
+#endif
+	{
+		PipelinePrecropRect precrop = pipeline_common_compute_precrop(
+			c->width, c->height, c->out_width, c->out_height,
+			c->keep_aspect ? true : false);
+		int cropping = (precrop.w != c->width || precrop.h != c->height);
+		ot_vpss_crop_info crop;
+
+		memset(&crop, 0, sizeof(crop));
+		crop.enable = cropping ? TD_TRUE : TD_FALSE;
+		crop.crop_mode = OT_COORD_ABS;
+		crop.crop_rect.x = precrop.x;
+		crop.crop_rect.y = precrop.y;
+		crop.crop_rect.width = precrop.w;
+		crop.crop_rect.height = precrop.h;
+		if (cropping || SNS_VPSS_CROP_ALWAYS_SET)
+			CV610_CHECK(ss_mpi_vpss_set_grp_crop(VPSS_GRP, &crop));
+		if (cropping)
+			printf("  ok  aspect crop %ux%u+%u+%u of %ux%u -> %ux%u\n",
+				(unsigned)precrop.w, (unsigned)precrop.h,
+				(unsigned)precrop.x, (unsigned)precrop.y,
+				c->width, c->height, c->out_width, c->out_height);
+	}
+
 	printf("  ok  VPSS %ux%u -> %ux%u%s\n", c->width, c->height,
 		c->out_width, c->out_height,
 		(c->out_width == c->width && c->out_height == c->height) ?
