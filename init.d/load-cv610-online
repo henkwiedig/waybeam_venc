@@ -4,12 +4,15 @@
 
 set -u
 
+[ -e /etc/waybeam-cv610.conf ] && . /etc/waybeam-cv610.conf
+
 MODULE_DIR=${MODULE_DIR:-/lib/modules/$(uname -r)/hisilicon}
 ARTIFACT_DIR=${ARTIFACT_DIR:-/usr/lib/cv610}
 MMZ_START=${CV610_MMZ_START:-0x44000000}
 MMZ_SIZE=${CV610_MMZ_SIZE:-64M}
 # Clock profile for the initial insmod; the daemon retunes it per mode.
 SENSOR_PROFILE=${CV610_SENSOR_PROFILE:-imx662}
+BOARD_PROFILE=${CV610_BOARD_PROFILE:-dmeb_qfn}
 # Analog microphone on the inner ACODEC. Off by default so the hardware-verified
 # video-only module set stays the default boot path.
 AUDIO=${CV610_AUDIO:-0}
@@ -90,14 +93,16 @@ cleanup_partial()
 
 start_modules()
 {
-	[ -r "$ARTIFACT_DIR/open_sys_config_imx662.ko" ] || {
-		echo "missing patched IMX662 sys_config module" >&2
-		return 1
-	}
-	[ -r "$ARTIFACT_DIR/open_pm_stub.ko" ] || {
-		echo "missing registration-only PM shim" >&2
-		return 1
-	}
+	if [ $SENSOR_PROFILE = "imx662" ]; then
+		[ -r "$ARTIFACT_DIR/open_sys_config_imx662.ko" ] || {
+			echo "missing patched IMX662 sys_config module" >&2
+			return 1
+		}
+		[ -r "$ARTIFACT_DIR/open_pm_stub.ko" ] || {
+			echo "missing registration-only PM shim" >&2
+			return 1
+		}
+	fi
 	is_loaded open_pm && {
 		echo "refusing vendor open_pm" >&2
 		return 1
@@ -125,21 +130,31 @@ start_modules()
 	}
 
 	trap cleanup_partial EXIT HUP INT TERM
-	echo "load patched open_sys_config"
-	insmod "$ARTIFACT_DIR/open_sys_config_imx662.ko" \
-		sensors=sns0="$SENSOR_PROFILE",sns1="$SENSOR_PROFILE" \
-		board=dmeb_qfn ir_auto=0 || return 1
-	loaded="open_sys_config $loaded"
+
+	if [ $SENSOR_PROFILE = "imx662" ]; then
+	  echo "load patched open_sys_config"
+	  insmod "$ARTIFACT_DIR/open_sys_config_imx662.ko" \
+	  	sensors=sns0="$SENSOR_PROFILE",sns1="$SENSOR_PROFILE" \
+	  	board=$BOARD_PROFILE ir_auto=0 || return 1
+	  loaded="open_sys_config $loaded"
+	else
+	  load_stock open_sys_config \
+		  sensors=sns0="$SENSOR_PROFILE",sns1="$SENSOR_PROFILE" \
+		  board=$BOARD_PROFILE ir_auto=0 || return 1
+	  loaded="open_sys_config_imx662 $loaded"
+	fi
 	load_stock open_osal proc_show=1 || return 1
 	load_stock open_mmz anony=1 mmz_allocator=ot \
 		mmz=anonymous,0,"$MMZ_START","$MMZ_SIZE" mem_process_isolation=0 || return 1
 	load_stock open_base logmpp_show=1 || return 1
 
-	echo "load registration-only PM shim"
-	insmod "$ARTIFACT_DIR/open_pm_stub.ko" || return 1
-	loaded="open_pm_stub $loaded"
-	is_loaded open_pm_stub || return 1
-	is_loaded open_pm && return 1
+	if [ $SENSOR_PROFILE = "imx662" ]; then
+		echo "load registration-only PM shim"
+		insmod "$ARTIFACT_DIR/open_pm_stub.ko" || return 1
+		loaded="open_pm_stub $loaded"
+		is_loaded open_pm_stub || return 1
+		is_loaded open_pm && return 1
+	fi
 
 	load_stock open_vb || return 1
 	load_stock open_vca || return 1
@@ -182,6 +197,22 @@ start_modules()
 
 	load_stock open_sensor_i2c || return 1
 	load_stock open_mipi_rx || return 1
+
+	load_stock open_adc  || return 1
+	load_stock open_devstat  || return 1
+	load_stock open_ive  || return 1
+	load_stock open_piris  || return 1
+	load_stock open_pwm  || return 1
+	load_stock open_sensor_spi  || return 1
+	load_stock open_spi_dma_transfer  || return 1
+	load_stock open_svac3e  || return 1
+	load_stock open_svp_npu  || return 1
+	load_stock open_user_proc  || return 1
+	load_stock open_uvc  || return 1
+	load_stock open_wdt  || return 1
+
+	load_stock open_pm || return 1
+
 	load_stock open_user || return 1
 	loaded=""
 	trap - 0 1 2 15
@@ -199,11 +230,13 @@ stop_modules()
 		echo "stop those consumers first, e.g. /etc/init.d/S97waybeam-hub stop" >&2
 		return 1
 	fi
-	modules="open_user open_mipi_rx open_sensor_i2c \
+
+	modules="open_adc open_devstat open_ive open_piris open_pwm open_sensor_spi open_spi_dma_transfer open_svac3e open_svp_npu open_user_proc open_uvc open_wdt \
+	    open_user open_mipi_rx open_sensor_i2c \
 		open_acodec open_aenc open_ai open_aio \
 		open_jpege open_h265e open_venc open_rc open_chnl open_isp open_vi \
 		open_vpss open_vgs open_vpp open_rgn open_sys open_vca open_vb \
-		open_pm_stub open_base open_mmz open_osal open_sys_config"
+		open_pm open_base open_mmz open_osal open_sys_config"
 	rc=0
 	set +e
 	for name in $modules; do
