@@ -2498,7 +2498,6 @@ static int cv610_run(void *opaque)
 		size_t frame_len = 0;
 		td_s32 ret;
 		int ready;
-	int select_errno;
 
 		if (venc_api_get_reinit()) {
 			venc_api_clear_reinit();
@@ -2553,6 +2552,8 @@ static int cv610_run(void *opaque)
 			continue;
 		}
 #else
+		int select_errno;
+
 		FD_ZERO(&readfds);
 		FD_SET(venc_fd, &readfds);
 		ready = select(venc_fd + 1, &readfds, NULL, NULL, &timeout);

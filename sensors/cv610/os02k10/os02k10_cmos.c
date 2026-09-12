@@ -424,7 +424,17 @@ static td_void cmos_comm_sns_reg_info_init(ot_vi_pipe vi_pipe, ot_isp_sns_state 
 	for (i = 0; i < sns_state->regs_info[0].reg_num; i++) {
 		sns_state->regs_info[0].i2c_data[i].update        = TD_TRUE;
 		sns_state->regs_info[0].i2c_data[i].delay_frame_num = 0;
-		sns_state->regs_info[0].i2c_data[i].dev_addr      = OS02K10_I2C_ADDR;
+		/* The kernel's fast-update I2C path (ot_sensor_i2c_write() in
+		 * sensor_i2c.ko) right-shifts dev_addr by 1 to get the 7-bit
+		 * slave address, so it needs the 8-bit form here -- unlike the
+		 * userspace OT_I2C_SLAVE_FORCE ioctl in os02k10_sensor_ctl.c,
+		 * which takes OS02K10_I2C_ADDR (7-bit) raw. Passing the 7-bit
+		 * form here made every per-frame AE/gain write target the wrong
+		 * address (0x1B instead of 0x36): silently dropped exposure/gain
+		 * updates plus a "wait idle abort" flood in dmesg. Matches
+		 * IMX662_I2C_ADDR's convention (defined 8-bit, shifted down only
+		 * at the ioctl call site). */
+		sns_state->regs_info[0].i2c_data[i].dev_addr      = (OS02K10_I2C_ADDR << 1);
 		sns_state->regs_info[0].i2c_data[i].addr_byte_num = OS02K10_ADDR_BYTE;
 		sns_state->regs_info[0].i2c_data[i].data_byte_num = OS02K10_DATA_BYTE;
 		sns_state->regs_info[0].i2c_data[i].reg_addr      = reg_addr[i];
