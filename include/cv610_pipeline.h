@@ -21,14 +21,21 @@ typedef struct {
 	int bayer;
 	int raw_bit;
 	/* image.mirror / image.flip.  Applied at the SENSOR (the plugin's
-	 * pfn_mirror_flip), matching what both SigmaStar backends do, so
-	 * `image.*` means the same thing on every board and the encoder is not
-	 * asked to do geometry.
+	 * pfn_mirror_flip) by default, matching what both SigmaStar backends
+	 * do, so `image.*` means the same thing on every board and the
+	 * encoder is not asked to do geometry.
 	 *
 	 * The Bayer start phase does NOT move with the readout on IMX662 —
 	 * measured, see isp_setup().  The textbook answer is one XOR per axis
 	 * into pub.bayer_format and it is the WRONG one here; do not add it
-	 * back without re-running that A/B. */
+	 * back without re-running that A/B.
+	 *
+	 * EXCEPTION: OS02K10 (SNS_ORIENTATION_AT_VPSS) applies this at the
+	 * VPSS channel instead (mirror_en/flip_en) -- confirmed on hardware
+	 * that this sensor's own orientation register, even written to the
+	 * vendor's exact confirmed value, corrupts the MIPI RX capture path
+	 * until a full power cycle. See apply_sensor_orientation() and
+	 * vpss_setup() in cv610_pipeline.c. */
 	int mirror;
 	int flip;
 	/* MCLK this mode's sensor line timing assumes.  Zero leaves whatever

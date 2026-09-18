@@ -64,12 +64,25 @@ extern "C" {
 #define OS02K10_REG_HTS_LO          0x380d  /* line_length_pclk, lo (const) */
 #define OS02K10_REG_VTS_HI          0x380e  /* frame_length_lines, hi       */
 #define OS02K10_REG_VTS_LO          0x380f  /* frame_length_lines, lo       */
-/* Mirror/flip: confirmed correct for the default angle=0 (normal) case only
- * — a live capture showed 0x3820=0x02/0x3821=0x00 with a correctly oriented
- * image. The alternate 0x0c value the vendor's runtime `?2:0xc` select can
- * produce was never exercised (no mirrored/flipped capture taken), so which
- * bit does what within 0x3820 is not decoded — os02k10_mirror_flip() below
- * only reproduces the confirmed default. */
+/* Mirror/flip: both values confirmed against the vendor's own decompiled
+ * init table (ar_ldyhs_sky, the angle==0/angle==180 select right before
+ * the FORMAT1 write). FORMAT1=0x02/FORMAT2=0x00 is normal (angle=0);
+ * FORMAT1=0x0c/FORMAT2=0x00 is the vendor's only other state, a combined
+ * 180-degree mirror+flip -- there is no independent single-axis mirror-
+ * only or flip-only value anywhere in that table, so os02k10_mirror_flip()
+ * below only implements those two states.
+ *
+ * NOT CURRENTLY USED: confirmed correct against the vendor's own values,
+ * but writing this register on this board's actual sensor+MIPI RX
+ * combination corrupts the capture path until a full power cycle (see
+ * cv610_pipeline.c's apply_sensor_orientation(), gated off by
+ * SNS_ORIENTATION_AT_VPSS). image.mirror/flip is applied at the VPSS
+ * channel instead -- confirmed correct geometry AND colour on the bench,
+ * since VPSS operates on the already-demosaiced YUV frame downstream of
+ * the ISP, sidestepping the Bayer-phase question this comment used to
+ * flag as unverified for the sensor-level path. Kept here (byte-accurate
+ * to the vendor) in case a future MIPI RX fix ever makes the sensor-level
+ * path usable again. */
 #define OS02K10_REG_FORMAT1         0x3820
 #define OS02K10_REG_FORMAT2         0x3821
 

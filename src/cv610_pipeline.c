@@ -595,7 +595,9 @@ static int vi_start_chn(const Cv610PipelineRuntimeConfig *c)
 	 * SigmaStar backends make, and for the same reason: the VI/VPE digital
 	 * path costs bandwidth and behaves inconsistently across sensor combos,
 	 * while the sensor's own H/V reverse is free.  See
-	 * apply_sensor_orientation(). */
+	 * apply_sensor_orientation().  (OS02K10 is the one exception, applied
+	 * at the VPSS channel instead — see SNS_ORIENTATION_AT_VPSS in
+	 * vpss_setup(); this VI channel stays unmirrored either way.) */
 	chn_attr.mirror_en     = TD_FALSE;
 	chn_attr.flip_en       = TD_FALSE;
 	chn_attr.depth         = 0;
@@ -744,6 +746,15 @@ static void apply_sensor_orientation(const Cv610PipelineRuntimeConfig *c)
 {
 	ot_isp_sns_mirrorflip_type type;
 
+#if SNS_ORIENTATION_AT_VPSS
+	/* OS02K10 only: handled at the VPSS channel instead -- see the
+	 * SNS_ORIENTATION_AT_VPSS block in vpss_setup(). Confirmed on hardware
+	 * that writing this sensor's own orientation register corrupts the
+	 * MIPI RX capture path until a full power cycle, even for the exact
+	 * value the vendor's own firmware uses. */
+	(void)type;
+	return;
+#endif
 	if (g_sns_obj == NULL || g_sns_obj->pfn_mirror_flip == NULL) {
 		if (c->mirror || c->flip)
 			fprintf(stderr,
@@ -893,6 +904,22 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	chn_attr.depth         = 0;
 	chn_attr.frame_rate.src_frame_rate = -1;
 	chn_attr.frame_rate.dst_frame_rate = -1;
+#if SNS_ORIENTATION_AT_VPSS
+	/* OS02K10 only: sensor-side mirror/flip (see apply_sensor_orientation())
+	 * is confirmed broken on this board -- writing the sensor's own
+	 * orientation register (even the vendor's exact confirmed value for
+	 * 180 degrees) leaves the MIPI RX capture path producing a corrupted
+	 * ~90-degree-looking frame, and recovering needs a full power cycle,
+	 * not just a module reload. VPSS-level mirror/flip operates on the
+	 * already-captured frame downstream of the sensor and MIPI PHY, so it
+	 * can't hit that failure mode. The vendor's own stock firmware (and
+	 * this project's actual need) only ever uses mirror+flip together as
+	 * a single 180-degree rotate, never independently, so that is the
+	 * only combination exercised on hardware; both fields are wired
+	 * regardless in case independent axes are ever wanted. */
+	chn_attr.mirror_en = c->mirror ? TD_TRUE : TD_FALSE;
+	chn_attr.flip_en   = c->flip   ? TD_TRUE : TD_FALSE;
+#endif
 	CV610_CHECK(ss_mpi_vpss_set_chn_attr(VPSS_GRP, VPSS_CHN, &chn_attr));
 	CV610_CHECK(ss_mpi_vpss_enable_chn(VPSS_GRP, VPSS_CHN));
 	CV610_CHECK(ss_mpi_vpss_start_grp(VPSS_GRP));
@@ -901,8 +928,20 @@ static int vpss_setup(const Cv610PipelineRuntimeConfig *c)
 	 * interrupt attrs above: matches /proc/umap/vpss's "chn low delay
 	 * attr" (enable:Y, line_cnt:128) that our setup never reproduced
 	 * without it. Reuses SNS_VI_VPSS_EARLY_END rather than a new flag —
-	 * both are the same stock do_init_vi_vpss() online-mode bundle. */
+	 * both are the same stock do_init_vi_vpss() online-mode bundle.
+	 *
+	 * Confirmed on hardware: ss_mpi_vpss_set_chn_low_delay() fails
+	 * (0xa007800d) whenever mirror_en/flip_en are set above -- true
+	 * low-delay mode streams the frame out line-by-line as it arrives,
+	 * which a vertical flip cannot do (the last row has to be emitted
+	 * first, so the whole frame must be buffered). Skip enabling it
+	 * when orientation is actually requested; that only costs a little
+	 * latency on a craft mounted upside down, which is a fixed,
+	 * deliberate choice, not something toggled mid-flight. */
 #if SNS_VI_VPSS_EARLY_END
+#if SNS_ORIENTATION_AT_VPSS
+	if (!c->mirror && !c->flip)
+#endif
 	{
 		ot_low_delay_info low_delay;
 
