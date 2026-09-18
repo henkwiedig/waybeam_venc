@@ -72,17 +72,12 @@ extern "C" {
  * only or flip-only value anywhere in that table, so os02k10_mirror_flip()
  * below only implements those two states.
  *
- * NOT CURRENTLY USED: confirmed correct against the vendor's own values,
- * but writing this register on this board's actual sensor+MIPI RX
- * combination corrupts the capture path until a full power cycle (see
- * cv610_pipeline.c's apply_sensor_orientation(), gated off by
- * SNS_ORIENTATION_AT_VPSS). image.mirror/flip is applied at the VPSS
- * channel instead -- confirmed correct geometry AND colour on the bench,
- * since VPSS operates on the already-demosaiced YUV frame downstream of
- * the ISP, sidestepping the Bayer-phase question this comment used to
- * flag as unverified for the sensor-level path. Kept here (byte-accurate
- * to the vendor) in case a future MIPI RX fix ever makes the sensor-level
- * path usable again. */
+ * Confirmed correct on hardware (both geometry and colour) with the
+ * camera correctly mounted: an earlier bench session saw a ~90-degree-
+ * looking result from this exact write and wrongly concluded the write
+ * corrupted the MIPI RX capture path (see git history on this file for
+ * the abandoned VPSS-level workaround) -- the real cause was the camera
+ * having physically tipped over during testing, not this register. */
 #define OS02K10_REG_FORMAT1         0x3820
 #define OS02K10_REG_FORMAT2         0x3821
 

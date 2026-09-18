@@ -157,23 +157,21 @@ td_void os02k10_restart(ot_vi_pipe vi_pipe)
 
 td_void os02k10_mirror_flip(ot_vi_pipe vi_pipe, ot_isp_sns_mirrorflip_type sns_mirror_flip)
 {
-	/* NOT CALLED on this board's actual build: cv610_pipeline.c's
-	 * apply_sensor_orientation() returns before reaching pfn_mirror_flip
-	 * whenever SNS_ORIENTATION_AT_VPSS is set (which the Makefile sets
-	 * for os02k10) -- see the comment there for why. This function's
-	 * register values are still confirmed correct against the vendor's
-	 * own decompiled init table (cmos_2or4lane_10bit_linear_init-
-	 * equivalent in ar_ldyhs_sky): FORMAT1 exactly 0x02 (angle==0) or
-	 * 0x0c (angle==180, mirror+flip together), FORMAT2 always 0x00
-	 * either way. The vendor firmware itself has no third or fourth
-	 * value anywhere in that table -- ISP_SNS_MIRROR-only and
-	 * ISP_SNS_FLIP-only aren't a gap in this port, this sensor's stock
-	 * firmware doesn't support single-axis orientation either, only the
-	 * combined 180 degrees. (Other bit patterns in this register are
-	 * unexplored by the vendor table and confirmed unsafe on the bench:
-	 * 0x03 dropped the image entirely until the sensor's full init
-	 * sequence was replayed.) Kept correct in case a future MIPI RX fix
-	 * ever makes this path usable again. */
+	/* Confirmed against the vendor's own decompiled init table
+	 * (cmos_2or4lane_10bit_linear_init-equivalent in ar_ldyhs_sky): it
+	 * writes FORMAT1 as exactly 0x02 (angle==0) or 0x0c (angle==180,
+	 * i.e. mirror+flip together), FORMAT2 always 0x00 either way. The
+	 * vendor firmware itself has no third or fourth value anywhere in
+	 * that table -- ISP_SNS_MIRROR-only and ISP_SNS_FLIP-only aren't a
+	 * gap in this port, this sensor's stock firmware doesn't support
+	 * single-axis orientation either, only the combined 180 degrees.
+	 * Confirmed correct on hardware (geometry and colour) with the
+	 * camera correctly mounted.
+	 *
+	 * Other bit patterns in this register are unexplored by the vendor
+	 * table and confirmed unsafe on the bench: 0x03 dropped the image
+	 * entirely until the sensor's full init sequence was replayed. Do
+	 * not add new values here without a vendor-table cross-reference. */
 	switch (sns_mirror_flip) {
 		case ISP_SNS_NORMAL:
 			(td_void)os02k10_write_register(vi_pipe, OS02K10_REG_FORMAT1, 0x02);
