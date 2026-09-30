@@ -67,7 +67,7 @@
 #define VENC_FRAME_FLAG_SALVAGED 0x08
 
 typedef struct {
-	uint32_t pts;        /* capture timestamp (µs, truncated to 32 bits) */
+	uint32_t pts;        /* capture timestamp (µs, CLOCK_MONOTONIC, truncated to 32 bits) */
 	uint8_t  codec;      /* VENC_FRAME_CODEC_H265 */
 	uint8_t  flags;      /* VENC_FRAME_FLAG_*; venc sets IDR/GDR/ENHANCE */
 	uint8_t  gdr_pos;    /* 0-based position in GDR cycle (0 when inactive) */

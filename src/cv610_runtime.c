@@ -2545,6 +2545,11 @@ static int cv610_run(void *opaque)
 		(void)readfds;
 		(void)timeout;
 		(void)ready;
+		/* Same sidecar servicing as the select() path below, ahead of
+		 * the `continue`: without it this loop never read the sidecar
+		 * socket at all, so no probe could ever subscribe. */
+		if (ctx->sidecar.fd > 0)
+			rtp_sidecar_poll(&ctx->sidecar);
 		memset(&status, 0, sizeof(status));
 		ret = ss_mpi_venc_query_status(CV610_VENC_CHN, &status);
 		if (ret != TD_SUCCESS || status.cur_packs == 0) {
@@ -2696,8 +2701,19 @@ static int cv610_run(void *opaque)
 			 * the next IDR happened to resync it -- and the link
 			 * consumer assigns slice importance from that position. */
 			memset(&frame_meta, 0, sizeof(frame_meta));
-			frame_meta.pts = stream.pack_cnt ?
-				(uint32_t)stream.pack[0].pts : 0;
+			/* The ring's pts is a capture time on CLOCK_MONOTONIC, the
+			 * same clock as the sidecar's capture_us and as Star6E's
+			 * ring: a consumer can then compare it with its own clock
+			 * (ar8030-transport maps it onto the ground for per-frame
+			 * latency).  The raw MPP pts sits seconds away from that
+			 * clock on this SoC, so convert it; fall back to the raw
+			 * value only if the MPP timebase could not be read. */
+			if (stream.pack_cnt) {
+				uint64_t cap_us = cv610_capture_us_from_pts(ctx,
+					(uint64_t)stream.pack[0].pts);
+				frame_meta.pts = cap_us ? (uint32_t)cap_us
+					: (uint32_t)stream.pack[0].pts;
+			}
 			frame_meta.codec = VENC_FRAME_CODEC_H265;
 			frame_meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
 			if (is_enhance)
