@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# waybeam on AR9311 (BetaFPV P1): load the camera chain + wave5, then start
+# the encoder.  /etc/waybeam.json is read from its fixed path.
+#
+# Restarting waybeam without a reboot is not reliable on this SoC: the wave5
+# firmware keeps state across encoder instances, and a second H.265 instance
+# in one boot can encode noise at an inflated bitrate (see
+# docs/AR9311_BACKEND.md).  `restart` is kept for debugging; reboot to
+# recover a broken stream.
+
+DAEMON="waybeam"
+RESPAWN="waybeam-resp"
+WATCHDOG="waybeam-wd"
+DAEMON_PATH="/usr/bin/waybeam"
+LOADER="/usr/bin/load-ar9311-camera"
+LOG_PATH="/tmp/waybeam.log"
+
+still_running() {
+	pidof "$DAEMON" "$RESPAWN" "$WATCHDOG" >/dev/null 2>&1
+}
+
+wait_exit() {
+	i=0
+	while [ $i -lt 30 ]; do
+		still_running || return 0
+		sleep 0.5
+		i=$((i + 1))
+	done
+	echo "Warning: $DAEMON did not exit in time, killing"
+	killall -9 "$DAEMON" "$RESPAWN" "$WATCHDOG" 2>/dev/null
+	sleep 1
+}
+
+start() {
+	if still_running; then
+		echo "$DAEMON already running"
+		return 0
+	fi
+	echo -n "Starting $DAEMON: "
+	"$LOADER" start || { echo "FAILED (camera modules)"; return 1; }
+	"$DAEMON_PATH" > "$LOG_PATH" 2>&1 &
+	i=0
+	while [ $i -lt 10 ]; do
+		sleep 0.3
+		still_running && { echo "OK"; return 0; }
+		i=$((i + 1))
+	done
+	echo "FAILED (see $LOG_PATH)"
+	return 1
+}
+
+stop() {
+	echo -n "Stopping $DAEMON: "
+	killall "$DAEMON" "$RESPAWN" "$WATCHDOG" 2>/dev/null
+	wait_exit
+	echo "OK"
+}
+
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart) stop; start ;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+	;;
+esac

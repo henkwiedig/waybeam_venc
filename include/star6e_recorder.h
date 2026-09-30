@@ -234,7 +234,8 @@ int star6e_recorder_start(Star6eRecorderState *state, const char *dir);
 int star6e_recorder_write_au(Star6eRecorderState *state,
 	const uint8_t *au, size_t len, int is_idr);
 
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 /** Write one encoded frame (all NAL units) to the recording file.
  *  No-op if not currently recording.  Returns bytes written, 0 if not
  *  active, or -1 on error.  Automatically stops recording on disk full

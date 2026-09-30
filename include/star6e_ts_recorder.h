@@ -146,7 +146,8 @@ void star6e_ts_recorder_status(const Star6eTsRecorderState *state,
 	uint32_t *segments, const char **path,
 	Star6eRecorderStopReason *last_stop_reason);
 
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 /** Convenience: extract NAL data from MI_VENC_Stream_t and write as TS.
  *  Handles IDR detection and PTS from CLOCK_MONOTONIC.
  *  No-op if not active.

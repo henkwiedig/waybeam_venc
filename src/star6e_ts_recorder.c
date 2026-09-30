@@ -6,7 +6,8 @@
  * independent entry points directly.  Stated as "not those two" rather than
  * "PLATFORM_STAR6E" because the host test build defines no platform macro
  * at all and must keep compiling these. */
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 #include "star6e_output.h"
 #endif
 
@@ -555,7 +556,8 @@ int star6e_ts_recorder_is_recording(const Star6eTsRecorderState *state)
 	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
 }
 
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
 	const MI_VENC_Stream_t *stream)
 {

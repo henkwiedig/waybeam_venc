@@ -425,6 +425,7 @@ to skip that combination.
 | Star6E | ssc338q | imx335 | 0 | 192.168.1.13 | `/etc/sensors/imx335_greg_fpvVII-gpt200.bin` | `--verbose` |
 | Maruko | ssc378qe | imx415 | 0 | 192.168.2.12 | `/etc/sensors/imx415.bin` | |
 | Maruko | ssc378qe | imx335 | 0 | | `/etc/sensors/imx335.bin` | |
+| AR9311 | ar9311 (BetaFPV P1) | nt99235 | 0 | 192.168.3.104 | | reboot before each run (docs/AR9311_BACKEND.md) |
 
 - Stream destination host for 192.168.1.X network: `192.168.1.2`
 - Stream destination host for 192.168.2.X network: `192.168.2.2`

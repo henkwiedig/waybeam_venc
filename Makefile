@@ -51,6 +51,12 @@ CV610_PQ_LIB ?= ../hisilicon/vendor/pq/libbin.so
 # under sensors/cv610/, and the SNS_* -D defines below.
 CV610_SENSOR_PLUGIN ?= imx662
 
+# AR9311 (Artosyn PROXIMA 9311, BetaFPV P1) runs the mainline kernel with the
+# MissingLynk camera and wave5 drivers: plain V4L2, no vendor SDK or libraries.
+# It builds with the OpenIPC builder's aarch64 musl toolchain; the default
+# points at the ar9311_fpv_artlynk-p1 build tree next to this checkout.
+AR9311_CC ?= ../builder/openipc-ar9311_fpv_artlynk-p1/output/host/bin/aarch64-openipc-linux-musl-gcc
+
 OUT_DIR := out/$(SOC_BUILD)
 OBJ_DIR := $(OUT_DIR)/obj
 TARGET := $(OUT_DIR)/waybeam
@@ -102,6 +108,19 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
 	src/framing_kalman.c src/attitude_est.c src/debug_osd.c \
 	src/debug_osd_draw.c lib/cJSON.c \
+	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
+	src/hevc_rtp.c src/rtp_session.c src/rtp_sidecar.c src/output_socket.c \
+	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
+	src/device_id.c src/venc_respawn.c
+AR9311_SRC := src/main.c src/backend_ar9311.c src/ar9311_runtime.c \
+	src/ar9311_capture.c src/ar9311_encoder.c src/ar9311_validation.c \
+	src/ar9311_v4l2.c \
+	src/backend.c \
+	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
+	src/venc_jpeg.c src/venc_rec_writer.c $(RECORDER_SRC) \
+	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
+	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c \
+	src/framing_kalman.c src/attitude_est.c lib/cJSON.c \
 	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
 	src/hevc_rtp.c src/rtp_session.c src/rtp_sidecar.c src/output_socket.c \
 	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
@@ -226,8 +245,20 @@ SOC_LIBS := -lss_mpi -lss_mpi_isp -lss_mpi_ae -lss_mpi_awb \
 BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
 BUILD_TESTS := 0
 TOOLCHAIN_TARGET := cv610-sdk
+else ifeq ($(SOC_BUILD),ar9311)
+CC := $(AR9311_CC)
+SRC := $(AR9311_SRC)
+DRV :=
+DRV_EXTRA :=
+SOC_CFLAGS :=
+SOC_DEFS := -DPLATFORM_AR9311 -DHAVE_BACKEND_AR9311=1
+SOC_LDFLAGS :=
+SOC_LIBS := -lm
+BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
+BUILD_TESTS := 0
+TOOLCHAIN_TARGET :=
 else
-$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e', 'maruko', or 'cv610')
+$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e', 'maruko', 'cv610', or 'ar9311')
 endif
 
 CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
@@ -245,6 +276,7 @@ help:
 	@echo "  make build SOC_BUILD=maruko"
 	@echo "  make build SOC_BUILD=cv610 CV610_CC=... CV610_SDK_INC=... CV610_SDK_LIB=..."
 	@echo "  make build SOC_BUILD=cv610 CV610_SENSOR_PLUGIN=os02k10 ...  (default: imx662)"
+	@echo "  make build SOC_BUILD=ar9311 [AR9311_CC=.../aarch64-openipc-linux-musl-gcc]"
 	@echo "  make lint        Fast warning check (-Wall -Werror, compile only)"
 	@echo "  make qr-decode   Build the freestanding QR decoder for SOC_BUILD"
 	@echo "  make unix-dgram-consumer Build the target-local unix:// RTP test consumer"
@@ -459,6 +491,12 @@ stage: build qr-decode
 			echo "         Set CV610_PQ_LIB to stage it."; \
 		fi; \
 	fi
+	@if [ "$(SOC_BUILD)" = "ar9311" ]; then \
+		cp -f config/waybeam.default.ar9311.json $(OUT_DIR)/waybeam.json; \
+		cp -f init.d/S95waybeam.ar9311 $(OUT_DIR)/S95waybeam; \
+		cp -f init.d/load-ar9311-camera $(OUT_DIR)/load-ar9311-camera; \
+		chmod +x $(OUT_DIR)/S95waybeam $(OUT_DIR)/load-ar9311-camera; \
+	fi
 
 print-config:
 	@echo "SOC_BUILD=$(SOC_BUILD)"
@@ -477,6 +515,7 @@ HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=
                 $(QR_MATH_CFLAGS)
 TEST_RUNNER  := tests/test_runner
 CV610_VALIDATION_TEST := tests/test_cv610_validation
+AR9311_VALIDATION_TEST := tests/test_ar9311_validation
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
                 tests/test_sensor_select.c tests/test_venc_ring.c \
@@ -526,14 +565,21 @@ $(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \
 		src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -lm -o $@
 
-test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST)
+$(AR9311_VALIDATION_TEST): tests/test_ar9311_validation.c \
+		src/ar9311_validation.c src/pipeline_common.c \
+		src/intra_refresh.c src/venc_config.c src/codec_config.c lib/cJSON.c
+	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -ldl -lm -o $@
+
+test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
+	./$(AR9311_VALIDATION_TEST)
 
 test-werror: HOST_CFLAGS += -Werror
-test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST)
+test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
+	./$(AR9311_VALIDATION_TEST)
 
 test-asan:
 	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
@@ -783,6 +829,7 @@ clean:
 	rm -f $(TIMING_PROBE_TARGET)
 	rm -f $(TEST_RUNNER)
 	rm -f $(CV610_VALIDATION_TEST)
+	rm -f $(AR9311_VALIDATION_TEST)
 	rm -f $(QR_TEST_RUNNER)
 	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc
