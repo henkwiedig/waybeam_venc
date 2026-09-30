@@ -179,6 +179,15 @@ SOC_DEFS := -DPLATFORM_CV610 -DHAVE_BACKEND_CV610=1 \
 # macro (os02k10_cmos.h / imx662_cmos_param.h) — the ISP framework binds
 # by that numeric id, not by name.
 ifeq ($(CV610_SENSOR_PLUGIN),os02k10)
+# SNS_VENC_POLL_NOT_SELECT=0: wait for encoded frames with select() on the
+# VENC fd. The query_status + usleep(3000) loop mirrored the stock firmware,
+# but this kernel runs HZ=100 without high-resolution timers, so each sleep
+# lasted until the next 10 ms tick: frames were picked up on a 100.000 Hz grid
+# while the sensor runs at 100.126 Hz (108 MHz / (831 x 1298)), a sawtooth of
+# 0-10 ms extra latency, and 7% of frames held a whole extra tick. select()
+# is woken by the driver: capture -> encode done went from 16.4 ms median /
+# 20.7 ms p90 to 12.3 / 12.4 ms on the bench (2026-09-30).
+#
 # Ascent wires OS02K10 to combo device 1 on the MIPI PHY's 2+2-lane split,
 # physical lanes {1,3} — confirmed against the stock Ascent firmware's
 # /proc/umap/mipi_rx (port_id=1, lane_mode=2+2, lane_id=1,3,-1,-1). Not the
@@ -193,7 +202,7 @@ SOC_DEFS += -DSNS_LIB_PATH='"/usr/lib/sensors/libsns_os02k10.so"' \
 	-DSNS_VI_COMP_MASK0=0xFFF00000 -DSNS_VI_DATA_SEQ=OT_VI_DATA_SEQ_YVYU \
 	-DSNS_VPSS_GRP_RATE_MATCH=1 -DSNS_VPSS_CROP_ALWAYS_SET=0 \
 	-DSNS_VI_ONLINE_CLOCK_HZ=0 -DSNS_VI_VPSS_EARLY_END=1 \
-	-DSNS_VENC_CHN=1 -DSNS_VENC_BY_FRAME=0 -DSNS_VENC_POLL_NOT_SELECT=1 \
+	-DSNS_VENC_CHN=1 -DSNS_VENC_BY_FRAME=0 -DSNS_VENC_POLL_NOT_SELECT=0 \
 	-DSNS_VENC_FORCE_IDR=1
 else ifeq ($(CV610_SENSOR_PLUGIN),imx662)
 SOC_DEFS += -DSNS_LIB_PATH='"/usr/lib/sensors/libsns_imx662.so"' \
