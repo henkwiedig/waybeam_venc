@@ -1,0 +1,46 @@
+#!/bin/sh
+# Load the AR9311 (BetaFPV P1) camera chain and the wave5 codec.
+#
+# The MissingLynk open camera stack: NT99235 sensor -> CSI-2 receiver -> VIF
+# -> ISP -> CVISP, which exposes the "ar-cvisp" V4L2 capture node waybeam
+# reads.  Sink before source is not required at load time; streaming order is
+# handled by the drivers at STREAMON.
+#
+# Load once per boot and never unload: wave5 uploads its firmware at probe
+# and cannot be re-probed without a power cycle (a second probe returns
+# -EBUSY and leaves the codec unbound), and the camera chain only writes
+# frames reliably on its first bring-up of a boot.
+#
+# Sensor exposure/gain are fixed module parameters (no AE loop yet):
+#   NT99235_EXPOSURE (lines, driver default 1123) and NT99235_GAIN.
+
+MODULES="nt99235 ar-csi2 ar-vif ar-isp ar-cvisp wave5"
+
+loaded()
+{
+	lsmod | grep -q "^$(echo "$1" | tr - _) "
+}
+
+start()
+{
+	for m in $MODULES; do
+		loaded "$m" && continue
+		args=""
+		if [ "$m" = nt99235 ]; then
+			[ -n "$NT99235_EXPOSURE" ] && args="$args exposure=$NT99235_EXPOSURE"
+			[ -n "$NT99235_GAIN" ] && args="$args gain=$NT99235_GAIN"
+		fi
+		# shellcheck disable=SC2086
+		modprobe "$m" $args || { echo "load-ar9311-camera: $m failed" >&2; return 1; }
+	done
+	for p in /sys/class/video4linux/video*; do
+		[ "$(cat "$p/name" 2>/dev/null)" = ar-cvisp ] && return 0
+	done
+	echo "load-ar9311-camera: no ar-cvisp node after loading" >&2
+	return 1
+}
+
+case "$1" in
+start) start ;;
+*) echo "usage: $0 start" >&2; exit 2 ;;
+esac

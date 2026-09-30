@@ -24,7 +24,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#ifndef PLATFORM_CV610
+#if !defined(PLATFORM_CV610) && !defined(PLATFORM_AR9311)
 #define SSTAR_GEN_REG    0x1F003C00u  /* low16 = chip generation tag        */
 #define DIEID_BASE_6E    0x1F203150u  /* INFINITY6E (ssc338q) die-ID base   */
 #define DIEID_BASE_ALT   0x1F004058u  /* other SigmaStar generations        */
@@ -57,10 +57,11 @@ bool device_id_serial(char *out, size_t len)
 	if (!out || len < 13)
 		return false;
 
-#ifdef PLATFORM_CV610
-	/* SigmaStar RIU addresses are unsafe on HiSilicon.  CV610 identity will
-	 * be added through an OTP-backed provider once its public register/API is
-	 * confirmed; mDNS falls back to the configured/host name meanwhile. */
+#if defined(PLATFORM_CV610) || defined(PLATFORM_AR9311)
+	/* SigmaStar RIU addresses are unsafe on HiSilicon and Artosyn.  CV610
+	 * identity will be added through an OTP-backed provider once its public
+	 * register/API is confirmed; mDNS falls back to the configured/host name
+	 * meanwhile.  AR9311 likewise has no identity provider yet. */
 	return false;
 #else
 

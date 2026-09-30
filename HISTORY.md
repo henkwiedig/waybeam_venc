@@ -1,5 +1,37 @@
 # History
 
+## [0.86.0] - 2026-09-30
+
+**New backend: AR9311** (Artosyn PROXIMA 9311, BetaFPV P1 air unit), the
+fourth, and the first with no vendor SDK. It runs on the mainline kernel with
+MissingLynk's open drivers: the NT99235 camera chain is one V4L2 capture node
+(`ar-cvisp`) and the encoder is the mainline wave5 mem2mem driver, so the
+backend is plain ioctl code. See `docs/AR9311_BACKEND.md`.
+
+- `SOC_BUILD=ar9311`, aarch64 musl, built with the OpenIPC builder's
+  toolchain (`AR9311_CC`).  `make stage` adds `S95waybeam`,
+  `load-ar9311-camera` and a frame-shm `waybeam.json`.
+- Zero copy: camera planes are exported as dma-bufs and imported by the
+  encoder at the camera's own 2048-byte stride.  1080p60 sustained on a P1
+  with no skipped frames; CBR tracks 2/8/30 Mbit/s, including live changes.
+- H.265 level 4.1, frame + CU rate control, 100 ms VBV, parameter sets on
+  every IDR, no AUDs; the camera's capture timestamp is carried to the
+  frame-shm `pts`.
+- Outputs: shared HEVC RTP over udp:// / unix://, or frame-shm://.  Live:
+  `video0.bitrate`, `outgoing.*`, `system.verbose`, `/request/idr`.  One
+  mode (1920x1080@60); ISP/AE, audio, recording, snapshot, ROI, resilience
+  and slicing are advertised unsupported and rejected.
+- **Restarting needs a reboot on this SoC:** the wave5 firmware can bring a
+  second encoder instance of the same boot up emitting a valid stream of
+  noise at ~2.5x the target rate (observed on the bench), so a respawn can
+  break the video until the next boot.
+- Shared code: guards that meant "SigmaStar" but read "not CV610" now also
+  exclude AR9311 (sensor mode listing, dual-VENC API, the SDK-typed recorder
+  adapters), and `device_id` no longer probes SigmaStar `/dev/mem` addresses
+  there — on AR9311 those are unrelated hardware.  CV610, Star6E and Maruko
+  build unchanged.
+- `tests/test_ar9311_validation` (host) covers the accepted config surface.
+
 ## [0.85.0] - 2026-10-20
 
 CV610: **`video0.fpsDivisor`**, live frame decimation, and a `video0.bitrate`

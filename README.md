@@ -16,12 +16,15 @@ RTP / compact UDP / Unix / SHM video to a ground station, optionally
 records to SD card, and exposes the whole pipeline through a single
 zero-restart HTTP API and a built-in web dashboard.
 
-Three build-time SoC backends share one source tree:
+Four build-time SoC backends share one source tree:
 
 - **Star6E** — SigmaStar Infinity6E (SSC30KQ, SSC338Q).
 - **Maruko** — SigmaStar Infinity6C (SSC378QE).
 - **CV610** — HiSilicon Hi3516CV610 with Sony IMX662 (initial streaming
   backend; advanced controls are being added in phases under #220).
+- **AR9311** — Artosyn PROXIMA 9311 (BetaFPV P1) with NT99235, on the
+  mainline kernel's V4L2 camera and wave5 encoder drivers (initial
+  streaming backend; see `docs/AR9311_BACKEND.md`).
 
 Each binary is produced from the same `make build` invocation with
 different `SOC_BUILD=` flags. SigmaStar MI vendor libraries are loaded via
@@ -80,6 +83,10 @@ make build SOC_BUILD=cv610 \
   CV610_CC=/path/to/arm-openipc-linux-musleabi-gcc \
   CV610_SDK_INC=/path/to/openhisilicon \
   CV610_SDK_LIB=/path/to/cv610/rootfs/usr/lib
+
+# Artosyn AR9311 (aarch64 musl toolchain from the OpenIPC builder; no SDK)
+make build SOC_BUILD=ar9311 \
+  AR9311_CC=/path/to/aarch64-openipc-linux-musl-gcc
 ```
 
 The toolchain is auto-downloaded on first build. Each backend builds to
@@ -89,6 +96,7 @@ its own output directory:
 out/star6e/waybeam   # Star6E binary
 out/maruko/waybeam   # Maruko binary
 out/cv610/waybeam    # CV610 binary
+out/ar9311/waybeam   # AR9311 binary
 ```
 
 All backend outputs can coexist; no clean is needed when switching.
@@ -100,6 +108,7 @@ make stage SOC_BUILD=star6e
 # Output: out/star6e/{waybeam,qr_decode} + out/star6e/lib/*.so
 # (Maruko also stages drivers/ + isp-bins/)
 # (CV610 also stages sensors/, S95waybeam, waybeam-cv610.conf, and waybeam.json)
+# (AR9311 also stages S95waybeam, load-ar9311-camera, and waybeam.json)
 ```
 
 Run host tests:

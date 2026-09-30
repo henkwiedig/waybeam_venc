@@ -17,8 +17,12 @@
 #if HAVE_BACKEND_MARUKO
 #include "maruko_pipeline.h"
 #endif
+#if HAVE_BACKEND_AR9311
+#include "ar9311_validation.h"
+#endif
 #include "rtp_packetizer.h"
-#if !HAVE_BACKEND_CV610
+/* The SigmaStar sensor-mode enumeration; CV610 and AR9311 list their own. */
+#if !HAVE_BACKEND_CV610 && !HAVE_BACKEND_AR9311
 #include "sensor_select.h"
 #endif
 /* The recorder state machine, its RECORDER_DEFAULT_DIR and the TS mux are
@@ -869,6 +873,11 @@ static Mutability field_mut_for_backend(const FieldDesc *f)
 	if (f->mut == MUT_LIVE && strcmp(g_backend, "cv610") == 0 &&
 	    cv610_field_is_restart_only(f->key))
 		return MUT_RESTART;
+#if HAVE_BACKEND_AR9311
+	if (f->mut == MUT_LIVE && strcmp(g_backend, "ar9311") == 0 &&
+	    ar9311_field_is_restart_only(f->key))
+		return MUT_RESTART;
+#endif
 	return f->mut;
 }
 
@@ -880,6 +889,31 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	canonical_key = canonicalize_field_key(field_key);
 	if (!canonical_key)
 		return 0;
+
+	/* AR9311 (first slice): exactly the fields ar9311_runtime.c reads.
+	 * Everything else -- ISP, audio, recording, snapshot, ROI, resilience,
+	 * slicing -- is not implemented there, so it is advertised unsupported
+	 * and rejected before mutation rather than accepted and ignored. */
+	if (backend_name && strcmp(backend_name, "ar9311") == 0) {
+		static const char *const supported[] = {
+			"system.web_port", "system.verbose",
+			"sensor.index", "sensor.mode",
+			"video0.fps", "video0.size", "video0.bitrate",
+			"video0.gop_size", "video0.min_qp", "video0.max_qp",
+			"outgoing.enabled", "outgoing.server",
+			"outgoing.max_payload_size", "outgoing.connected_udp",
+			"outgoing.allow_unix_encoder_stall",
+			"discovery.enabled", "discovery.service_type",
+			"discovery.name", "discovery.bare_alias",
+		};
+		size_t i;
+
+		for (i = 0; i < sizeof(supported) / sizeof(supported[0]); ++i) {
+			if (strcmp(canonical_key, supported[i]) == 0)
+				return 1;
+		}
+		return 0;
+	}
 
 	/* CV610 starts with an intentionally small, truthful control surface.
 	 * All other shared-schema fields remain visible in config JSON but are
@@ -1583,6 +1617,9 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 	 * cv610_prepare() calls cv610_mode_check_output() directly against a
 	 * config file edited behind the daemon's back. */
 	return cv610_validate_config(cfg);
+#elif HAVE_BACKEND_AR9311
+	/* After the shared sweep, like CV610. */
+	return ar9311_validate_config(cfg);
 #else
 	return NULL;
 #endif
@@ -1601,6 +1638,9 @@ static const char *validate_backend_config(const char *backend_name,
 #if HAVE_BACKEND_CV610
 	if (backend_name && strcmp(backend_name, "cv610") == 0)
 		return cv610_validate_config(cfg);
+#elif HAVE_BACKEND_AR9311
+	if (backend_name && strcmp(backend_name, "ar9311") == 0)
+		return ar9311_validate_config(cfg);
 #else
 	(void)backend_name;
 #endif
@@ -3852,7 +3892,7 @@ static int handle_record_status(int fd, const HttpRequest *req, void *ctx)
 
 /* ── Dual VENC channel API ───────────────────────────────────────────── */
 
-#if !HAVE_BACKEND_CV610
+#if !HAVE_BACKEND_CV610 && !HAVE_BACKEND_AR9311
 #include "star6e.h"  /* MI_VENC_* */
 #include "star6e_controls.h"
 #endif
@@ -4338,6 +4378,11 @@ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
 	(void)ctx;
 	return httpd_send_error(fd, 501, "not_implemented",
 		"dual VENC is not available on CV610");
+#elif HAVE_BACKEND_AR9311
+	(void)req;
+	(void)ctx;
+	return httpd_send_error(fd, 501, "not_implemented",
+		"dual VENC is not available on AR9311");
 #else
 	MI_VENC_CHN ch;
 	int ret;
@@ -4423,6 +4468,21 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	rc = httpd_send_json(fd, 200, str);
 	free(str);
 	return rc;
+#elif HAVE_BACKEND_AR9311
+	/* The one mode ar9311_validate_config() accepts, in the CV610 shape. */
+	char buf[320];
+	int selected;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	selected = g_sensor_mode;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	snprintf(buf, sizeof(buf), "{\"ok\":true,\"data\":{\"selected_pad\":0,"
+		"\"selected_mode\":%d,\"pads\":[{\"pad\":0,\"modes\":[{"
+		"\"index\":0,\"width\":%d,\"height\":%d,\"min_fps\":%d,"
+		"\"max_fps\":%d,\"desc\":\"NT99235 2-lane\",\"selected\":%s}]}]}}",
+		selected, AR9311_WIDTH, AR9311_HEIGHT, AR9311_FPS, AR9311_FPS,
+		selected == 0 ? "true" : "false");
+	return httpd_send_json(fd, 200, buf);
 #else
 	pthread_mutex_lock(&g_cfg_mutex);
 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;

@@ -6,7 +6,8 @@
  * independent entry points directly.  Stated as "not those two" rather than
  * "PLATFORM_STAR6E" because the host test build defines no platform macro
  * at all and must keep compiling these. */
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 #include "star6e_output.h"
 #endif
 
@@ -186,7 +187,8 @@ static int build_recording_path(char *path, size_t path_size, const char *dir)
 	return 0;
 }
 
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
 {
 	struct iovec pending[16];
@@ -578,7 +580,8 @@ int star6e_recorder_write_au(Star6eRecorderState *state,
  * the two — together with the larger maruko_recorder.c duplication — is a
  * separate change with its own verification. */
 
-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
+#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && \
+    !defined(PLATFORM_AR9311)
 /* Can a new segment open on this access unit?  An IRAP, or the parameter sets
  * that head a GDR refresh wave -- see RecorderRotation.  Deliberately the same
  * h265-only reading the TS recorder uses, so the two cannot disagree about
