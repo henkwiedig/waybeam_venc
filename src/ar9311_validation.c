@@ -77,13 +77,16 @@ const char *ar9311_validate_config(const VencConfig *cfg)
 }
 
 /* Everything the backend supports is read once at start except these: the
- * encoder takes a new bitrate and a keyframe request while running, and the
- * output side is plain userspace state. */
+ * encoder takes a new bitrate and a keyframe request while running, the AE
+ * limits are read every decision, and the output side is plain userspace
+ * state. */
 int ar9311_field_is_restart_only(const char *field_key)
 {
 	static const char *const live[] = {
 		"system.verbose",
 		"video0.bitrate",
+		"isp.gain_max", "isp.gain_min",
+		"isp.shutter_max_us", "isp.shutter_min_us",
 		"outgoing.enabled", "outgoing.server",
 		"outgoing.max_payload_size",
 	};

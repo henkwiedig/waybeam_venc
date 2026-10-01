@@ -114,7 +114,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/device_id.c src/venc_respawn.c
 AR9311_SRC := src/main.c src/backend_ar9311.c src/ar9311_runtime.c \
 	src/ar9311_capture.c src/ar9311_encoder.c src/ar9311_validation.c \
-	src/ar9311_v4l2.c \
+	src/ar9311_v4l2.c src/ar9311_ae.c \
 	src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
 	src/venc_jpeg.c src/venc_rec_writer.c $(RECORDER_SRC) \
@@ -516,6 +516,7 @@ HOST_CFLAGS  := -std=c99 -Wall -Wextra -g -O0 -D_GNU_SOURCE -D_FILE_OFFSET_BITS=
 TEST_RUNNER  := tests/test_runner
 CV610_VALIDATION_TEST := tests/test_cv610_validation
 AR9311_VALIDATION_TEST := tests/test_ar9311_validation
+AR9311_AE_TEST := tests/test_ar9311_ae
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
                 tests/test_sensor_select.c tests/test_venc_ring.c \
@@ -570,16 +571,24 @@ $(AR9311_VALIDATION_TEST): tests/test_ar9311_validation.c \
 		src/intra_refresh.c src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -ldl -lm -o $@
 
-test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST)
+$(AR9311_AE_TEST): tests/test_ar9311_ae.c src/ar9311_ae.c include/ar9311_ae.h
+	$(HOST_CC) $(HOST_CFLAGS) -Werror tests/test_ar9311_ae.c src/ar9311_ae.c \
+		-lpthread -lm -o $@
+
+test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST) \
+		$(AR9311_AE_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
 	./$(AR9311_VALIDATION_TEST)
+	./$(AR9311_AE_TEST)
 
 test-werror: HOST_CFLAGS += -Werror
-test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST)
+test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST) \
+		$(AR9311_AE_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
 	./$(AR9311_VALIDATION_TEST)
+	./$(AR9311_AE_TEST)
 
 test-asan:
 	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
@@ -830,6 +839,7 @@ clean:
 	rm -f $(TEST_RUNNER)
 	rm -f $(CV610_VALIDATION_TEST)
 	rm -f $(AR9311_VALIDATION_TEST)
+	rm -f $(AR9311_AE_TEST)
 	rm -f $(QR_TEST_RUNNER)
 	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc
