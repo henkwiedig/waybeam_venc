@@ -3,6 +3,9 @@
     "webPort": 80,
     "verbose": false
   },
+  "isp": {
+    "antiFlickerHz": 0
+  },
   "video0": {
     "rcMode": "cbr",
     "fps": 60,

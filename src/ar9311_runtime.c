@@ -302,10 +302,11 @@ static void ar9311_ae_limits_from(const VencConfigIsp *isp, Ar9311AeLimits *lim)
 	if (lim->gain_min_q10 > lim->gain_max_q10)
 		lim->gain_min_q10 = lim->gain_max_q10;
 	lim->target = AR9311_AE_TARGET;
+	lim->flicker_hz = isp->anti_flicker_hz;
 }
 
-/* One live limit changed: the shared API has already committed it to the
- * config, so rebuild all four from there. */
+/* One live AE setting changed (a limit or anti-flicker): the shared API has
+ * already committed it to the config, so rebuild them all from there. */
 static int ar9311_apply_ae_limit(uint32_t value)
 {
 	Ar9311RunnerContext *ctx = g_ar9311_runner;
@@ -337,6 +338,7 @@ static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.apply_gain_min = ar9311_apply_ae_limit,
 	.apply_shutter_max = ar9311_apply_ae_limit,
 	.apply_shutter_min = ar9311_apply_ae_limit,
+	.apply_anti_flicker = ar9311_apply_ae_limit,
 	.query_ae_info = ar9311_query_ae_info,
 };
 

@@ -408,6 +408,16 @@ typedef struct {
  * dashboard.html edit / webui-blob rebuild.  Ranges mirror the validators in
  * validate_field(); 0 = "use preset default" where noted.  group = the
  * collapsible section title the renderer buckets them under. */
+static const FieldUi ui_anti_flicker_hz = {
+	"ISP", "Anti-flicker (Hz)", "select", 0, 0, 0,
+	(const char *const[]){ "0", "50", "60", NULL },
+	"Mains anti-banding: under mains lighting, keep the exposure time a "
+	"whole number of half mains periods so rows integrate the same light. "
+	"0 = off, 50 or 60 = the local mains frequency. Costs gain in dim "
+	"light (at 50 Hz the longest flicker-free exposure is 10 ms); bright "
+	"scenes that need less than one half period are left alone. "
+	"Applied live. AR9311 only."
+};
 static const FieldUi ui_awb_fps = {
 	"ISP", "AWB rate (Hz)", "number", 0, 30, 1, NULL,
 	/* Reads on BOTH backends — this text is served to Maruko too, where the
@@ -575,6 +585,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(isp, shutter_max_us,     FT_UINT,   MUT_LIVE),
 	FIELD(isp, gain_min,           FT_UINT,   MUT_LIVE),
 	FIELD(isp, shutter_min_us,     FT_UINT,   MUT_LIVE),
+	FIELD_UI(isp, anti_flicker_hz, FT_UINT,   MUT_LIVE, &ui_anti_flicker_hz),
 	FIELD(isp, awb_mode,           FT_STRING, MUT_LIVE),
 	FIELD(isp, awb_ct,             FT_UINT,   MUT_LIVE),
 
@@ -752,6 +763,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "isp.shutterMaxUs", "isp.shutter_max_us" },
 	{ "isp.gainMin", "isp.gain_min" },
 	{ "isp.shutterMinUs", "isp.shutter_min_us" },
+	{ "isp.antiFlickerHz", "isp.anti_flicker_hz" },
 	{ "isp.awbMode", "isp.awb_mode" },
 	{ "isp.awbCt", "isp.awb_ct" },
 	{ "video0.rcMode", "video0.rc_mode" },
@@ -903,6 +915,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
 			"isp.gain_max", "isp.gain_min",
 			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
+			"isp.anti_flicker_hz",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",
@@ -1121,6 +1134,13 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
 		return 0;
 
+	/* isp.anti_flicker_hz constrains waybeam's own AE loop, which only
+	 * AR9311 has; the SigmaStar SDK AE keeps its own ae_flicker IQ
+	 * parameter.  (CV610 already rejects it through its own list, and
+	 * AR9311 returned above.) */
+	if (strcmp(canonical_key, "isp.anti_flicker_hz") == 0)
+		return 0;
+
 	/* These controls have no Maruko implementation.  Keep them in the shared
 	 * schema so clients can render one dashboard, but advertise them honestly
 	 * and reject writes before they reach a missing callback or route.
@@ -1323,6 +1343,10 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		    access(cfg->isp.sensor_bin, R_OK) != 0)
 			return "isp.sensor_bin path is not readable";
 	}
+	if (strcmp(key, "isp.anti_flicker_hz") == 0 &&
+	    cfg->isp.anti_flicker_hz != 0 && cfg->isp.anti_flicker_hz != 50 &&
+	    cfg->isp.anti_flicker_hz != 60)
+		return "isp.anti_flicker_hz must be 0 (off), 50 or 60";
 	if (strcmp(key, "video0.qp_delta") == 0) {
 		if (strcmp(g_backend, "cv610") == 0) {
 			if (cfg->video0.qp_delta < -10 || cfg->video0.qp_delta > 30)
@@ -1579,6 +1603,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 	 * registered after config load, so they cannot run here. */
 	static const char *const keys[] = {
 		"isp.awb_mode",
+		"isp.anti_flicker_hz",
 		"video0.bitrate",
 		"video0.qp_delta",
 		"video0.min_qp",
@@ -1759,6 +1784,7 @@ typedef enum {
 	LIVE_GROUP_SHUTTER_MAX,
 	LIVE_GROUP_GAIN_MIN,
 	LIVE_GROUP_SHUTTER_MIN,
+	LIVE_GROUP_ANTI_FLICKER,
 	LIVE_GROUP_AWB,
 	LIVE_GROUP_VERBOSE,
 	LIVE_GROUP_OUTGOING,
@@ -1933,6 +1959,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_GAIN_MIN;
 	if (strcmp(canonical_key, "isp.shutter_min_us") == 0)
 		return LIVE_GROUP_SHUTTER_MIN;
+	if (strcmp(canonical_key, "isp.anti_flicker_hz") == 0)
+		return LIVE_GROUP_ANTI_FLICKER;
 	if (strcmp(canonical_key, "isp.awb_mode") == 0 ||
 	    strcmp(canonical_key, "isp.awb_ct") == 0 ||
 	    strcmp(canonical_key, "isp.awb_fps") == 0)
@@ -1991,6 +2019,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "isp.gain_min";
 	case LIVE_GROUP_SHUTTER_MIN:
 		return "isp.shutter_min_us";
+	case LIVE_GROUP_ANTI_FLICKER:
+		return "isp.anti_flicker_hz";
 	case LIVE_GROUP_AWB:
 		return "isp.awb_*";
 	case LIVE_GROUP_VERBOSE:
@@ -2158,6 +2188,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_gain_min != NULL;
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min != NULL;
+	case LIVE_GROUP_ANTI_FLICKER:
+		return g_cb->apply_anti_flicker != NULL;
 	case LIVE_GROUP_AWB:
 		/* Backstop, not the primary gate: awbFps is advertised
 		 * unsupported on backends without the loop (see
@@ -2241,6 +2273,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_SHUTTER_MIN:
 		dst->isp.shutter_min_us = src->isp.shutter_min_us;
+		break;
+	case LIVE_GROUP_ANTI_FLICKER:
+		dst->isp.anti_flicker_hz = src->isp.anti_flicker_hz;
 		break;
 	case LIVE_GROUP_AWB:
 		if (touched && touched->awb_mode) {
@@ -2390,6 +2425,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return g_cb->apply_gain_min(cfg->isp.gain_min);
 	case LIVE_GROUP_SHUTTER_MIN:
 		return g_cb->apply_shutter_min(cfg->isp.shutter_min_us);
+	case LIVE_GROUP_ANTI_FLICKER:
+		return g_cb->apply_anti_flicker(cfg->isp.anti_flicker_hz);
 	case LIVE_GROUP_AWB:
 		/* Rate first: it starts/stops the userspace loop, and the mode
 		 * apply below decides ownership from the committed awbFps. */

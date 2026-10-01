@@ -44,7 +44,7 @@ static void make_grid(uint8_t *rro, unsigned level, unsigned bright)
 static Ar9311AeLimits default_limits(void)
 {
 	Ar9311AeLimits lim = { 1, AR9311_AE_LINES_MAX, AR9311_AE_GAIN_ONE,
-		64u * AR9311_AE_GAIN_ONE, AR9311_AE_TARGET };
+		64u * AR9311_AE_GAIN_ONE, AR9311_AE_TARGET, 0 };
 
 	return lim;
 }
@@ -161,9 +161,85 @@ static int test_step(void)
 	return f;
 }
 
+/* Lines of one half mains period at 1080p60 (14.815 us per line). */
+static double half_lines(unsigned hz)
+{
+	return 1e9 / (2.0 * hz) / AR9311_AE_LINE_NS;
+}
+
+static int is_multiple(uint32_t lines, double half)
+{
+	double n = lines / half;
+
+	return fabs(n - floor(n + 0.5)) * half <= 1.0;
+}
+
+static int test_flicker(void)
+{
+	Ar9311AeLimits lim = default_limits();
+	Ar9311AePoint p;
+	double e;
+	int f = 0;
+
+	lim.flicker_hz = 50;
+	e = AR9311_AE_LINES_MAX * 4.0;          /* dim: would be full frame */
+	p = ar9311_ae_split(e, &lim);
+	f += expect("50 Hz: lines are one half period (10 ms)",
+		is_multiple(p.lines, half_lines(50)) && p.lines >= 674 &&
+		p.lines <= 676);
+	f += expect("50 Hz: gain makes up the exposure",
+		fabs(ar9311_ae_exposure_of(&p) - e) < e * 0.035);
+
+	lim.flicker_hz = 60;
+	p = ar9311_ae_split(e, &lim);
+	f += expect("60 Hz: two half periods fit the frame",
+		p.lines == AR9311_AE_LINES_MAX);
+	p = ar9311_ae_split(800.0 * 1.0, &lim);
+	f += expect("60 Hz: 800 lines snap down to one half period",
+		is_multiple(p.lines, half_lines(60)) && p.lines < 800 &&
+		p.gain_code > 0);
+
+	lim.flicker_hz = 50;
+	p = ar9311_ae_split(300.0, &lim);
+	f += expect("below one half period exposure stays free",
+		p.lines == 300 && p.gain_code == 0);
+
+	lim.lines_max = 400;                    /* shutter cap below 10 ms */
+	p = ar9311_ae_split(AR9311_AE_LINES_MAX * 2.0, &lim);
+	f += expect("shutter cap below a half period disables it",
+		p.lines <= 400 && p.lines > 350 &&
+		fabs(ar9311_ae_exposure_of(&p) - AR9311_AE_LINES_MAX * 2.0) <
+			AR9311_AE_LINES_MAX * 2.0 * 0.032);
+
+	lim = default_limits();
+	lim.flicker_hz = 50;
+	e = 1000.0;
+	{
+		static uint8_t rro[AR9311_AE_RRO_SIZE];
+		Ar9311AeMeter m;
+		int i;
+
+		/* Dim scene with anti-flicker: converges, lines stay legal. */
+		for (i = 0; i < 40; i++) {
+			double luma = e * (AR9311_AE_TARGET / 30000.0);
+
+			make_grid(rro, luma > 255 ? 255u : (unsigned)luma, 0);
+			ar9311_ae_meter(rro, &m);
+			ar9311_ae_step(&e, &m, &lim);
+			p = ar9311_ae_split(e, &lim);
+			e = ar9311_ae_exposure_of(&p);
+		}
+		f += expect("50 Hz: dim scene converges on legal lines",
+			is_multiple(p.lines, half_lines(50)) &&
+			fabs(e - 30000.0) < 30000.0 * 0.1);
+	}
+	return f;
+}
+
 int main(void)
 {
-	int failures = test_gain_and_meter() + test_split() + test_step();
+	int failures = test_gain_and_meter() + test_split() + test_step() +
+		test_flicker();
 
 	printf("ar9311 ae: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

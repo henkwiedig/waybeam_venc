@@ -1,5 +1,24 @@
 # History
 
+## [0.88.0] - 2026-10-01
+
+AR9311: **mains anti-flicker for the AE.**  `contract_version` moves to
+**0.33.0**.
+
+- New config field `isp.antiFlickerHz` (`0` off, `50`, `60`; live; alias of
+  `isp.anti_flicker_hz`) through every layer: struct, parser, printer,
+  field table, live group with an `apply_anti_flicker` callback, data-driven
+  UI metadata (select in the ISP group), default config, contract docs.
+  Supported on AR9311 only; the other backends advertise it unsupported.
+- With it on, the AE keeps the integration time a whole number of half mains
+  periods once the exposure reaches one (snapped down, gain makes up the
+  rest at the nearest code); shorter exposures and a shutter cap below one
+  half period leave it inactive.  `GET /api/v1/ae` reports it.
+- On a P1: 50 Hz -> 675 lines (10.000 ms) at 11.5x, 60 Hz -> 1123 lines at
+  7x, luma held; a set of 75 is refused.  Host tests cover the snapping,
+  gain compensation, the short-exposure and shutter-cap cases and
+  convergence with it on.
+
 ## [0.87.0] - 2026-10-01
 
 AR9311: **auto-exposure.**  A new loop (`src/ar9311_ae.c`) meters the ISP's

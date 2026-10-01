@@ -87,6 +87,7 @@ int ar9311_field_is_restart_only(const char *field_key)
 		"video0.bitrate",
 		"isp.gain_max", "isp.gain_min",
 		"isp.shutter_max_us", "isp.shutter_min_us",
+		"isp.anti_flicker_hz",
 		"outgoing.enabled", "outgoing.server",
 		"outgoing.max_payload_size",
 	};

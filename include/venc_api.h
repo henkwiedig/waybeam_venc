@@ -7,7 +7,7 @@
  * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
  * code still answering 0.21.0, so every craft advertised a contract it was not
  * serving. */
-#define VENC_CONTRACT_VERSION "0.32.0"
+#define VENC_CONTRACT_VERSION "0.33.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
@@ -30,6 +30,9 @@ typedef struct {
 	int (*apply_shutter_max)(uint32_t us);
 	int (*apply_gain_min)(uint32_t gain);
 	int (*apply_shutter_min)(uint32_t us);
+	/* Mains anti-banding for the AE: 0 off, 50 or 60 Hz.  NULL where the
+	 * backend's AE has no such constraint. */
+	int (*apply_anti_flicker)(uint32_t hz);
 	int (*apply_verbose)(bool on);
 	int (*apply_output_enabled)(bool on);
 	int (*apply_server)(const char *uri);

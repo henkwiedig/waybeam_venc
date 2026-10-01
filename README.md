@@ -400,7 +400,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.87.0","backend":"star6e","contract_version":"0.32.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.88.0","backend":"star6e","contract_version":"0.33.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -637,6 +637,7 @@ load cleanly; the keys are silently ignored.
 | `isp.ae_engine` | string | restart | `"sdk"` (default) lets the SDK firmware run AE on Star6E and Maruko.  `"custom"` runs userspace cus3a — on Star6E it spins the supervisory AE thread; on Maruko it installs the no-op adaptor + 15 Hz `SetAeParam` thread (~24% sys CPU saving at 120 fps).  Alias: `isp.aeEngine`. |
 | `isp.ae_fps` | uint | restart | Custom 3A processing rate in Hz (default 15) |
 | `isp.gain_max` | uint | live | AE max ISP gain ceiling (0 = use ISP bin default) |
+| `isp.anti_flicker_hz` | uint | live | Mains anti-banding for the AE: `0` off (default), `50` or `60` keep the exposure a whole number of half mains periods. AR9311 only (unsupported elsewhere). Alias: `isp.antiFlickerHz`. |
 | `isp.awb_mode` | string | live | `"auto"` or `"ct_manual"` |
 | `isp.awb_ct` | uint | live | Color temperature in K (for ct_manual) |
 | `isp.keep_aspect` | bool | restart | When `true` (default), VIF/SCL crop preserves sensor AR; `false` lets downstream stretch. Star6E + Maruko (Phase 1, v0.9.9). |

@@ -120,6 +120,9 @@ typedef struct {
 	uint32_t shutter_min_us; /* min exposure floor in µs (0 = use ISP bin
 	                          * default).  Overridden by shutter_rule_180,
 	                          * which pins min==max. */
+	uint32_t anti_flicker_hz; /* mains anti-banding for the AE: 0 = off,
+	                           * 50 or 60 = keep integration time a whole
+	                           * number of half mains periods (AR9311). */
 } VencConfigIsp;
 
 typedef struct {

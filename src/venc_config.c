@@ -94,6 +94,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->isp.sensor_bin[0] = '\0';
 	safe_strcpy(cfg->isp.ae_engine, sizeof(cfg->isp.ae_engine), "sdk");
 	cfg->isp.ae_fps = 15;
+	cfg->isp.anti_flicker_hz = 0;
 	cfg->isp.awb_fps = 15;
 	safe_strcpy(cfg->isp.awb_mode, sizeof(cfg->isp.awb_mode), "auto");
 	cfg->isp.awb_ct = 5500;
@@ -362,6 +363,8 @@ static void load_isp(const cJSON *root, VencConfigIsp *s)
 	s->gain_min = (uint32_t)json_get_int(obj, "gainMin", (int)s->gain_min);
 	s->shutter_min_us = (uint32_t)json_get_int(obj, "shutterMinUs",
 		(int)s->shutter_min_us);
+	s->anti_flicker_hz = (uint32_t)json_get_int(obj, "antiFlickerHz",
+		(int)s->anti_flicker_hz);
 	safe_strcpy(s->awb_mode, sizeof(s->awb_mode),
 		json_get_string(obj, "awbMode", s->awb_mode));
 	s->awb_ct = (uint32_t)json_get_int(obj, "awbCt", (int)s->awb_ct);
@@ -1394,6 +1397,7 @@ static void render_isp(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_uint(p,   2, "shutterMaxUs", cfg->isp.shutter_max_us, 0);
 	pp_field_uint(p,   2, "gainMin",    cfg->isp.gain_min,    0);
 	pp_field_uint(p,   2, "shutterMinUs", cfg->isp.shutter_min_us, 0);
+	pp_field_uint(p,   2, "antiFlickerHz", cfg->isp.anti_flicker_hz, 0);
 	pp_field_string(p, 2, "awbMode",    cfg->isp.awb_mode,    0);
 	pp_field_uint(p,   2, "awbCt",      cfg->isp.awb_ct,      0);
 	pp_field_bool(p,   2, "keepAspect",      cfg->isp.keep_aspect,      0);
@@ -1651,6 +1655,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(isp, "shutterMaxUs", cfg->isp.shutter_max_us);
 		cJSON_AddNumberToObject(isp, "gainMin", cfg->isp.gain_min);
 		cJSON_AddNumberToObject(isp, "shutterMinUs", cfg->isp.shutter_min_us);
+		cJSON_AddNumberToObject(isp, "antiFlickerHz",
+			cfg->isp.anti_flicker_hz);
 		cJSON_AddStringToObject(isp, "awbMode", cfg->isp.awb_mode);
 		cJSON_AddNumberToObject(isp, "awbCt", cfg->isp.awb_ct);
 		cJSON_AddBoolToObject(isp, "keepAspect", cfg->isp.keep_aspect);

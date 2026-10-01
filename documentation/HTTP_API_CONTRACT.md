@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.32.0`
+- `contract_version`: `0.33.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -43,6 +43,7 @@
 | `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before), **/ `video0.fpsDivisor` from 0.85.0** |
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
+| `isp.antiFlickerHz` | **false** | **false** | **false** (AR9311 only, **from 0.33.0**) |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 | `outgoing.server` that cannot be brought up | inert output, craft runs (**from 0.82.0**) | same | same |
 
@@ -109,8 +110,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.87.0",
-    "contract_version": "0.32.0",
+    "app_version": "0.88.0",
+    "contract_version": "0.33.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -2003,6 +2004,17 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.33.0` (additive — new config field, and a fourth backend):
+    Adds `isp.anti_flicker_hz` (uint, alias `isp.antiFlickerHz`, default
+    `0`, `MUT_LIVE`): mains anti-banding for an AE loop that waybeam runs
+    itself.  `0` is off; `50` or `60` keep the sensor integration time a whole
+    number of half mains periods, with gain making up the exposure.  Any other
+    value is rejected (`409`).  Supported only on the AR9311 backend
+    (`backend: "ar9311"`, BetaFPV P1), whose AE is waybeam's own; Star6E and
+    Maruko keep the SDK's `ae_flicker` IQ parameter and advertise this field
+    unsupported, as does CV610.  The field carries data-driven UI metadata
+    (`ISP` group, select `0`/`50`/`60`).  On AR9311, `GET /api/v1/ae` reports
+    the active value as `antiFlickerHz`.
 - `0.32.0` (additive — live frame decimation on CV610): adds `video0.fpsDivisor` (`video0.fps_divisor`), uint `1..4`, live, runtime-only (never persisted, not in `/api/v1/config`). CV610 encodes every Nth sensor frame and divides the `video0.bitrate` floor by N; `supported:false` on Star6E and Maruko. `/api/v1/fps/live` reports the decimated rate. See "`video0.fpsDivisor` (CV610) — Live Frame Decimation".
 - `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
     Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a

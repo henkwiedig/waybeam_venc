@@ -60,6 +60,16 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
   than 2 % short.  Written to `/sys/module/nt99235/parameters/{exposure,
   gain}`.  The ISP's gain-keyed denoise stages (`rnr/lnr/de3d/cfa/cnf_gain`)
   follow the applied gain and are re-armed through debugfs.
+- **Anti-flicker (live):** `isp.antiFlickerHz` `0` (off), `50` or `60`.
+  Mains light ripples at twice its frequency, so with it on, an exposure of
+  at least one half period gets an integration time that is a whole number
+  of half periods (snapped down, never up) and the gain makes up the rest,
+  rounded to the nearest code.  At 50 Hz that caps a dim scene at 10 ms
+  (675 lines) and costs about 1.7x gain against a full frame; at 60 Hz two
+  half periods are 1125 lines, taken as the 1123 the sensor allows.
+  Shorter exposures (bright scenes) and a shutter cap below one half period
+  leave it inactive.  Measured on a P1: 50 Hz -> 675 lines (10.000 ms) at
+  11.5x, 60 Hz -> 1123 lines at 7x, luma held throughout.
 - **Limits (live):** `isp.shutterMaxUs` / `shutterMinUs` (converted to
   lines, 14.815 us each) and `isp.gainMax` / `gainMin` (1024 = 1x); 0 means
   the sensor's own range.  `isp.aeFps` is read at start.
@@ -68,8 +78,7 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
 
 Measured on a P1 indoors: a covered lens reaches 64x within about 1 s and
 recovers as fast when uncovered; a steady scene holds with no moves.  Not
-yet in this loop: tone-curve selection (the ISP stays on its default),
-mains anti-flicker, AWB.  Without the statistics or sensor interfaces AE
+yet in this loop: tone-curve selection (the ISP stays on its default), AWB.  Without the statistics or sensor interfaces AE
 stays off and the camera keeps the sensor driver's fixed exposure.
 
 ## Runtime prerequisites
@@ -89,7 +98,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 |---|---|
 | `video0.bitrate` | live (wave5 re-targets the rate controller) |
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
-| `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits) | live |
+| `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
 | `video0.gopSize` (IDR period, max 2047 frames), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
