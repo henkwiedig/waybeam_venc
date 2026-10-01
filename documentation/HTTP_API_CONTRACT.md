@@ -112,7 +112,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.90.0",
+    "app_version": "0.90.1",
     "contract_version": "0.35.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
