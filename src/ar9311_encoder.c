@@ -127,8 +127,24 @@ static int set_rate_control(int fd, const Ar9311EncoderParams *params)
 	    set_ctrl(fd, V4L2_CID_MPEG_VIDEO_BITRATE,
 		(int32_t)(params->bitrate_kbps * 1000u), "bitrate") != 0 ||
 	    set_ctrl(fd, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
-		(int32_t)params->gop_frames, "gop") != 0)
+		params->refresh_period ? 0 : (int32_t)params->gop_frames,
+		"gop") != 0)
 		return -1;
+	/* Gradual refresh instead of keyframes: a band of intra CTU rows in
+	 * every picture, the opening IDR the only one.  A keyframe is ~13x a
+	 * P-frame at 1080p and stalls the radio link for tens of ms; the band
+	 * spreads that cost evenly. */
+	if (params->refresh_period &&
+	    (set_ctrl(fd, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE,
+		V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC,
+		"refresh_type") != 0 ||
+	     set_ctrl(fd, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD,
+		(int32_t)params->refresh_period, "refresh_period") != 0)) {
+		fprintf(stderr, "ERROR: [ar9311] this kernel's wave5 has no intra "
+			"refresh (builder patch 0001-media-wave5-expose-cyclic-"
+			"intra-refresh); use video0.resilience=off\n");
+		return -1;
+	}
 	if (params->min_qp && set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
 		(int32_t)params->min_qp, "min_qp") != 0)
 		return -1;
@@ -280,9 +296,15 @@ int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 		return -1;
 	if (map_stream_buffers(enc) != 0)
 		return -1;
-	printf("> [ar9311] encoder H.265 %ux%u@%u, %u kbps CBR, IDR every %u "
-		"frames\n", src->width, src->height, params->fps,
-		params->bitrate_kbps, params->gop_frames);
+	if (params->refresh_period)
+		printf("> [ar9311] encoder H.265 %ux%u@%u, %u kbps CBR, intra "
+			"refresh over %u frames, no periodic IDR\n", src->width,
+			src->height, params->fps, params->bitrate_kbps,
+			params->refresh_period);
+	else
+		printf("> [ar9311] encoder H.265 %ux%u@%u, %u kbps CBR, IDR every "
+			"%u frames\n", src->width, src->height, params->fps,
+			params->bitrate_kbps, params->gop_frames);
 	return 0;
 }
 

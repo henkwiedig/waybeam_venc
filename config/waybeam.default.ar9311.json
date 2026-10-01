@@ -13,7 +13,7 @@
     "bitrate": 8000,
     "gopSize": 1.0,
     "sliceCount": 1,
-    "resilience": "off",
+    "resilience": "racing",
     "framing": "off"
   },
   "outgoing": {

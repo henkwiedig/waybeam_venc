@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.35.0`
+- `contract_version`: `0.35.1`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -112,8 +112,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.90.1",
-    "contract_version": "0.35.0",
+    "app_version": "0.91.0",
+    "contract_version": "0.35.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -1418,7 +1418,8 @@ Error `500 delete_failed` — filesystem error.
 ### `GET /api/v1/intra/status`
 
 Report the intra-refresh (GDR) state the encoder actually applied, as opposed
-to what was requested. Served by Star6E, Maruko and CV610.
+to what was requested. Served by Star6E, Maruko, CV610 and (from 0.35.1)
+AR9311.
 
 ```bash
 curl http://<device-ip>/api/v1/intra/status
@@ -1451,7 +1452,8 @@ Always `200`. A backend with no intra-refresh support reports `mode:"off"`,
 ### `GET /api/v1/resilience/status`
 
 Report the resolved `video0.resilience` preset and both mechanisms it drives.
-Served by Star6E, Maruko and CV610.
+Served by Star6E, Maruko, CV610 and (from 0.35.1) AR9311, where `refPred` is
+always inactive.
 
 ```bash
 curl http://<device-ip>/api/v1/resilience/status
@@ -2031,6 +2033,18 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.35.1` (additive — AR9311 gains intra refresh):
+    AR9311 now advertises `video0.resilience` (`restart_required`) and serves
+    `GET /api/v1/intra/status` and `GET /api/v1/resilience/status`.  It
+    accepts `off` and the presets that use only intra refresh (`rescue`,
+    `quality`, `sprint`, `racing`, `endurance`, `patrol`); a preset with a
+    base/enhance reference structure is rejected (`409`).  With a refresh
+    preset on, the wave5 encoder runs cyclic intra refresh in CTU rows and
+    emits **no periodic IDR**: `gop.effective_sec` reads `0` and
+    `video0.gopSize` is not used.  `GET /request/idr` still forces one.
+    Needs the builder's wave5 kernel patch (cyclic intra-refresh controls);
+    without it the encoder fails to open and says so.  No other backend's
+    responses change.
 - `0.35.0` (additive — new config field, and a fourth backend):
     Adds `isp.anti_flicker_hz` (uint, alias `isp.antiFlickerHz`, default
     `0`, `MUT_LIVE`): mains anti-banding for an AE loop that waybeam runs

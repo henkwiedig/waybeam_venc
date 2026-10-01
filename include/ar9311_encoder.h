@@ -26,7 +26,12 @@
 typedef struct {
 	uint32_t fps;
 	uint32_t bitrate_kbps;
-	uint32_t gop_frames;   /* frames between IDRs, 1..AR9311_ENCODER_GOP_MAX */
+	uint32_t gop_frames;   /* frames between IDRs, 1..AR9311_ENCODER_GOP_MAX;
+	                        * ignored with refresh_period set */
+	uint32_t refresh_period; /* cyclic intra refresh: whole picture over
+	                          * this many frames, no periodic IDR; 0 = off
+	                          * (needs the builder's wave5 intra-refresh
+	                          * kernel patch) */
 	uint32_t min_qp;       /* 0 = driver default */
 	uint32_t max_qp;       /* 0 = driver default */
 } Ar9311EncoderParams;
