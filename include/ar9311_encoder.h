@@ -14,10 +14,11 @@
  * buffer per camera buffer, same index.  The CAPTURE queue holds mmapped
  * bitstream buffers, one access unit each.
  *
- * Open ONCE per boot: the codec firmware keeps hidden state across instance
- * destroy, and the next H.265 instance of the same boot alternates between
- * clean and corrupt output (MissingLynk ml-kernel
- * docs/wave5-encoder-instance-reuse.md). */
+ * The codec firmware keeps hidden state across instance destroy, so a later
+ * instance of the same boot can encode noise (MissingLynk ml-kernel
+ * docs/wave5-encoder-instance-reuse.md).  ar9311_encoder_open() therefore
+ * resets the VPU and reloads its firmware first, through the MissingLynk
+ * wave5 debugfs recover hook, whenever no other codec instance is live. */
 
 #define AR9311_ENCODER_STREAM_BUFS 4
 #define AR9311_ENCODER_GOP_MAX 2047  /* V4L2_CID_MPEG_VIDEO_GOP_SIZE range */
@@ -40,7 +41,8 @@ typedef struct {
 	int streaming;
 } Ar9311Encoder;
 
-/** Find the encoder node, program it for the camera geometry and @p params,
+/** Reset the VPU (see above), find the encoder node, program it for the
+ *  camera geometry and @p params,
  *  import @p src_count source buffers and queue the bitstream buffers.
  *  Returns 0 or -1. */
 int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,

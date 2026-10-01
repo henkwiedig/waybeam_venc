@@ -23,6 +23,10 @@
 /* QP of the instance's first IDR, coded before rate control has history:
  * the vendor encoder's own value (MissingLynk docs/air-video-benchmark.md). */
 #define AR9311_ENCODER_FIRST_IDR_QP 35
+/* MissingLynk wave5 debugfs: state lists live instances ("inst N ..."),
+ * recover resets the codec block and re-downloads its firmware. */
+#define AR9311_WAVE5_STATE "/sys/kernel/debug/wave5/state"
+#define AR9311_WAVE5_RECOVER "/sys/kernel/debug/wave5/recover"
 
 static int set_ctrl(int fd, uint32_t id, int32_t value, const char *name)
 {
@@ -209,6 +213,53 @@ static int map_stream_buffers(Ar9311Encoder *enc)
 	return 0;
 }
 
+/* Return the VPU to its boot state before this instance is created.
+ *
+ * The wave5 firmware keeps hidden state across instances: after the first
+ * encoder instance of a boot, a new one can come up emitting a valid stream
+ * of pure noise at an inflated bitrate, or watchdogging, whatever its input
+ * (MissingLynk ml-kernel docs/wave5-encoder-instance-reuse.md; reproduced
+ * on a P1).  A block reset with a firmware re-download clears it -- verified
+ * on a P1 whose VPU was already poisoned: three restarts in a row, all clean.
+ *
+ * The reset destroys every live instance, so it is skipped when any exists
+ * (nothing else uses the codec on an air unit, but it is not ours to kill). */
+static void reset_vpu(void)
+{
+	char line[128];
+	int live = 0, ok = 0;
+	FILE *f = fopen(AR9311_WAVE5_STATE, "r");
+
+	if (!f) {
+		fprintf(stderr, "WARN: [ar9311] %s missing (debugfs not mounted?): "
+			"VPU not reset, a restart within this boot may encode "
+			"noise\n", AR9311_WAVE5_STATE);
+		return;
+	}
+	while (fgets(line, sizeof(line), f))
+		if (strncmp(line, "inst ", 5) == 0)
+			live++;
+	fclose(f);
+	if (live) {
+		fprintf(stderr, "WARN: [ar9311] %d other wave5 instance(s) live: "
+			"VPU not reset\n", live);
+		return;
+	}
+	f = fopen(AR9311_WAVE5_RECOVER, "w");
+	if (f) {
+		/* The reset runs on the write, which fclose flushes. */
+		int put_ok = fputs("1", f) != EOF;
+
+		ok = fclose(f) == 0 && put_ok;
+	}
+	if (!ok) {
+		fprintf(stderr, "WARN: [ar9311] VPU reset failed: %s\n",
+			strerror(errno));
+		return;
+	}
+	printf("> [ar9311] VPU reset (block reset + firmware reload)\n");
+}
+
 int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 	int src_count, const Ar9311EncoderParams *params)
 {
@@ -216,6 +267,7 @@ int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 	enc->initialized = 1;
 	enc->src = *src;
 	enc->src_count = src_count;
+	reset_vpu();
 	enc->fd = ar9311_v4l2_open_by_name(AR9311_ENCODER_NODE_NAME);
 	if (enc->fd < 0)
 		return -1;
