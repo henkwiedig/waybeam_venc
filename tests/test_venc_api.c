@@ -472,6 +472,15 @@ static int test_field_support_by_backend(void)
 {
 	int failures = 0;
 
+	/* AR9311 orients in the encoder (a sensor mirror moves the Bayer
+	 * phase the ISP is tuned for). */
+	CHECK("mirror supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
+			"image.mirror") == 1);
+	CHECK("flip supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
+			"image.flip") == 1);
+
 	CHECK("scene_threshold supported star6e",
 		venc_api_field_supported_for_backend("star6e",
 			"video0.scene_threshold") == 1);

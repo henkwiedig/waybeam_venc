@@ -1,6 +1,34 @@
 # History
 
+## [0.90.0] - 2026-10-01
+
+AR9311: **picture controls and orientation.**  `contract_version` moves to
+**0.34.0**.
+
+- `/api/v1/iq` and `/api/v1/iq/set` on AR9311, in the CV610 shape, with the
+  fields a ground-station menu written for CV610 uses: exposure
+  compensation (AE target), saturation, contrast and sharpness.  A
+  PixelPilot/gsmenu built for the CV610 air unit drives the P1 unchanged
+  (verified from the goggles menu).  Live only, like CV610: nothing is
+  saved, and a restart returns to the tuned picture.  The web UI's IQ tab
+  renders from `_schema` as on CV610.
+- Saturation, contrast and sharpness are `ar_isp` module parameters from
+  the OpenIPC builder's P1 kernel patch (re-latched through the driver's
+  debugfs hooks): saturation scales the chroma coefficients of the
+  colour-space matrix, contrast the gamma curve about mid-grey, sharpness
+  the two lnr fields the vendor's acutance control drives, scaled the
+  vendor's way from the value the driver replays.  EV scales waybeam's AE
+  target (56 x 2^ev, 14..224).
+- `image.mirror` / `image.flip` are supported on AR9311 (restart), done by
+  the wave5 encoder: a sensor-side mirror would move the Bayer phase the ISP
+  is tuned for.  1080p60 with both on: 0 camera skips.
+- Measured on a P1 from decoded frames: saturation 0 gives U = V = 128.0
+  exactly (grey), 200 doubles the chroma deviation; sharpness 0/100/200 gives
+  edge energy 2.9/3.3/6.9 -- the vendor's own setting sits low, so most of
+  the range is above 100.
+
 ## [0.89.0] - 2026-10-01
+
 
 AR9311: **intra refresh (GDR) instead of periodic IDRs.**  `contract_version`
 moves to **0.33.1**.

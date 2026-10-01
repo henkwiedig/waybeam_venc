@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.33.1`
+- `contract_version`: `0.34.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -110,8 +110,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.89.0",
-    "contract_version": "0.33.1",
+    "app_version": "0.90.0",
+    "contract_version": "0.34.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -860,7 +860,8 @@ Error `501`:
 
 Query all ISP IQ parameter values. Star6E and Maruko share the SigmaStar
 response shape shown below. CV610 also serves this route, using the
-self-describing response documented under "CV610 IQ response shape".
+self-describing response documented under "CV610 IQ response shape";
+AR9311 serves a small subset of that same shape (from 0.34.0).
 
 ```bash
 curl http://<device-ip>/api/v1/iq
@@ -2006,6 +2007,13 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.34.0` (additive — AR9311 gains the IQ routes and orientation):
+    AR9311 now serves `GET /api/v1/iq` and `GET /api/v1/iq/set` in the CV610
+    response shape, with the subset documented under "AR9311 subset":
+    exposure compensation, saturation, contrast and sharpness, live only.
+    `capabilities.routes.iq` reads `true` there.  `image.mirror` and
+    `image.flip` are now supported on AR9311 (restart; applied by the
+    encoder, both together = 180 degrees).  No other backend changes.
 - `0.33.1` (additive — AR9311 gains intra refresh):
     AR9311 now advertises `video0.resilience` (`restart_required`) and serves
     `GET /api/v1/intra/status` and `GET /api/v1/resilience/status`.  It
@@ -2808,3 +2816,25 @@ Star6E/Maruko one documented above.  A client written against that shape reads
   bypassing.
 - Values out of a field's declared range are **rejected**, not clamped, so the
   value echoed by `/api/v1/iq/set` is the value applied.
+
+### AR9311 subset (0.34.0)
+
+AR9311 (BetaFPV P1) serves `/api/v1/iq` and `/api/v1/iq/set` in the CV610
+shape above, with only the fields a ground-station menu written for CV610
+drives.  Each one is a view of one picture control of the AR9311 ISP (open
+kernel drivers; the controls need the OpenIPC builder's P1 ISP patch) or of
+waybeam's own AE:
+
+| group.field | range | meaning on AR9311 |
+|---|---|---|
+| `exposure.auto.compensation` | 14..224 | AE target; 56 is the default, each doubling is +1 EV (±2 EV) |
+| `saturation.op_type` | 0..1 | 0 = tuned (100 %); 1 alone changes nothing |
+| `saturation.manual.saturation` | 0..255 | 128 = tuned, 0 = grey, 255 = 199 % |
+| `csc.contr` | 0..100 | 50 = tuned; the percentage is twice the value |
+| `sharpen.op_type` | 0..1 | 0 = tuned (100 %); 1 alone changes nothing |
+| `sharpen.manual.texture_strength`, `sharpen.manual.edge_strength` | 32 x 0..4095 | one control behind both: the mean against 2048 (tuned) is the sharpening percentage, capped at 200 % |
+
+- Reads report the current setting in these units (all 32 curve entries
+  equal); `op_type` reads 0 while a control is at its tuned value.
+- Live only, as on CV610: nothing is saved, and a waybeam restart returns to
+  the tuned picture.  No `module_ctrl` block.

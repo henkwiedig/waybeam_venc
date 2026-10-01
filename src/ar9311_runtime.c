@@ -3,6 +3,8 @@
 #include "ar9311_ae.h"
 #include "ar9311_capture.h"
 #include "ar9311_encoder.h"
+#include "ar9311_iq.h"
+#include "ar9311_picture.h"
 #include "ar9311_validation.h"
 #include "h26x_param_sets.h"
 #include "h26x_util.h"
@@ -294,6 +296,21 @@ static int ar9311_apply_output_enabled(bool on)
 	return 0;
 }
 
+/* The picture controls behind /api/v1/iq.  Live only: they start from the
+ * tuned picture on every daemon start, as CV610's ISP state does. */
+static pthread_mutex_t g_ar9311_picture_mutex = PTHREAD_MUTEX_INITIALIZER;
+static Ar9311Picture g_ar9311_picture = { 100, 100, 100, 0.0 };
+
+static double ar9311_picture_ev(void)
+{
+	double ev;
+
+	pthread_mutex_lock(&g_ar9311_picture_mutex);
+	ev = g_ar9311_picture.ev;
+	pthread_mutex_unlock(&g_ar9311_picture_mutex);
+	return ev;
+}
+
 /* ── Auto-exposure limits ────────────────────────────────────────────── */
 
 static uint32_t ar9311_us_to_lines(uint32_t us, uint32_t fallback)
@@ -322,7 +339,7 @@ static void ar9311_ae_limits_from(const VencConfigIsp *isp, Ar9311AeLimits *lim)
 		lim->lines_min = lim->lines_max;
 	if (lim->gain_min_q10 > lim->gain_max_q10)
 		lim->gain_min_q10 = lim->gain_max_q10;
-	lim->target = AR9311_AE_TARGET;
+	lim->target = ar9311_ae_target_for_ev(ar9311_picture_ev());
 	lim->flicker_hz = isp->anti_flicker_hz;
 }
 
@@ -339,6 +356,49 @@ static int ar9311_apply_ae_limit(uint32_t value)
 	ar9311_ae_limits_from(&ctx->config.isp, &lim);
 	ar9311_ae_set_limits(ctx->ae, &lim);
 	return 0;
+}
+
+static char *ar9311_query_iq_info(void)
+{
+	Ar9311Picture pic;
+	char *buf = malloc(4096);
+
+	if (!buf)
+		return NULL;
+	pthread_mutex_lock(&g_ar9311_picture_mutex);
+	pic = g_ar9311_picture;
+	pthread_mutex_unlock(&g_ar9311_picture_mutex);
+	if (ar9311_iq_render(&pic, buf, 4096) < 0) {
+		free(buf);
+		return NULL;
+	}
+	return buf;
+}
+
+/* The ISP takes saturation, contrast and sharpness; EV moves the AE target.
+ * The state is committed only once the ISP has taken it. */
+static int ar9311_apply_iq_param(const char *param, const char *value)
+{
+	Ar9311Picture pic;
+	int rc = 0;
+
+	pthread_mutex_lock(&g_ar9311_picture_mutex);
+	pic = g_ar9311_picture;
+	if (ar9311_iq_set(&pic, param, value) != 0) {
+		pthread_mutex_unlock(&g_ar9311_picture_mutex);
+		fprintf(stderr, "[ar9311] iq: %s=%s rejected\n", param, value);
+		return -1;
+	}
+	if (ar9311_picture_apply(pic.saturation, pic.contrast,
+		pic.sharpness) != 0)
+		rc = -1;
+	else
+		g_ar9311_picture = pic;
+	pthread_mutex_unlock(&g_ar9311_picture_mutex);
+	/* The AE limits read the committed EV; without AE it has no effect. */
+	if (rc == 0 && g_ar9311_runner && g_ar9311_runner->ae)
+		rc = ar9311_apply_ae_limit(0);
+	return rc;
 }
 
 static char *ar9311_query_ae_info(void)
@@ -360,6 +420,8 @@ static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.apply_shutter_max = ar9311_apply_ae_limit,
 	.apply_shutter_min = ar9311_apply_ae_limit,
 	.apply_anti_flicker = ar9311_apply_ae_limit,
+	.query_iq_info = ar9311_query_iq_info,
+	.apply_iq_param = ar9311_apply_iq_param,
 	.query_ae_info = ar9311_query_ae_info,
 };
 
@@ -743,6 +805,8 @@ static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 		ctx->config.video0.gop_size, AR9311_FPS);
 	params.min_qp = ctx->config.video0.min_qp;
 	params.max_qp = ctx->config.video0.max_qp;
+	params.mirror = ctx->config.image.mirror;
+	params.flip = ctx->config.image.flip;
 	ar9311_plan_refresh(ctx, &params);
 	if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH, AR9311_HEIGHT) != 0)
 		return -1;
@@ -775,6 +839,18 @@ static int ar9311_init(void *opaque)
 		/* Non-fatal: without AE the camera keeps its fixed exposure. */
 		ar9311_ae_limits_from(&ctx->config.isp, &lim);
 		ctx->ae = ar9311_ae_start(&lim, ctx->config.isp.ae_fps);
+	}
+	/* Non-fatal too: the tuned picture, which also undoes what an earlier
+	 * daemon left in the ISP driver's parameters. */
+	{
+		Ar9311Picture pic;
+
+		pthread_mutex_lock(&g_ar9311_picture_mutex);
+		ar9311_iq_neutral(&g_ar9311_picture);
+		pic = g_ar9311_picture;
+		pthread_mutex_unlock(&g_ar9311_picture_mutex);
+		(void)ar9311_picture_apply(pic.saturation, pic.contrast,
+			pic.sharpness);
 	}
 	if (ar9311_output_start(ctx) != 0)
 		return -1;

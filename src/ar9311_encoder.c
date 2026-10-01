@@ -145,6 +145,13 @@ static int set_rate_control(int fd, const Ar9311EncoderParams *params)
 			"intra-refresh); use video0.resilience=off\n");
 		return -1;
 	}
+	/* Orientation in the encoder's pre-processor rather than at the
+	 * sensor: a sensor mirror or flip moves the Bayer phase the ISP is
+	 * tuned for.  wave5 latches these at instance open and only ever sets
+	 * the bits, so 0 is left unwritten. */
+	if ((params->mirror && set_ctrl(fd, V4L2_CID_HFLIP, 1, "hflip") != 0) ||
+	    (params->flip && set_ctrl(fd, V4L2_CID_VFLIP, 1, "vflip") != 0))
+		return -1;
 	if (params->min_qp && set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
 		(int32_t)params->min_qp, "min_qp") != 0)
 		return -1;

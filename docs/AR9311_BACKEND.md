@@ -29,7 +29,9 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   below) or an IDR period from `video0.gopSize` with VPS/SPS/PPS on every
   IDR. The camera
   buffer's capture timestamp travels through the encoder to the frame-shm
-  `pts`.
+  `pts`. `image.mirror` / `image.flip` are done here too (V4L2 HFLIP/VFLIP,
+  set at open): mirroring at the sensor would move the Bayer phase the ISP
+  is tuned for.
 - **Auto-exposure** (`src/ar9311_ae.c`): see below.
 - **Output** (`src/ar9311_runtime.c`): the shared HEVC RTP packetizer over
   `udp://` / `unix://`, or the `frame-shm://` whole-frame ring (the transport
@@ -117,6 +119,34 @@ recovers as fast when uncovered; a steady scene holds with no moves.  Not
 yet in this loop: tone-curve selection (the ISP stays on its default), AWB.  Without the statistics or sensor interfaces AE
 stays off and the camera keeps the sensor driver's fixed exposure.
 
+## Picture controls (`/api/v1/iq`)
+
+AR9311 serves the IQ routes in the CV610 shape (`_schema` plus groups), with
+the subset a ground-station menu written for CV610 uses, so the same
+PixelPilot/gsmenu drives both air units; the web UI's IQ tab renders from
+the schema. Live only, as on CV610: a restart returns to the tuned picture.
+The field table is in the contract ("AR9311 subset"); behind it:
+
+- **Saturation** (`saturation.manual.saturation`, 128 = tuned): the six
+  chroma coefficients of the ISP's colour-space matrix (bank 0x3c00), scaled.
+  The vendor's matrix writer packs the Cb/Cr offsets (the 128 mid-point)
+  into the same words; those stay, or a desaturated picture turns green.
+- **Contrast** (`csc.contr`, 50 = tuned): the gamma curve's output, scaled
+  about mid-grey.
+- **Sharpness** (`sharpen.manual.*`, 2048 = tuned): lnr register 0x3d14, the
+  two fields the vendor's acutance control drives, scaled the vendor's way
+  (to zero below 100 %, towards the field maximum above) from the value the
+  driver replays. The vendor's own setting sits low, so most of the visible
+  range is above 100 % (edge energy 2.9 / 3.3 / 6.9 at 0 / 100 / 200 %).
+- **Exposure compensation** (`exposure.auto.compensation`): the AE target,
+  56 x 2^ev for +-2 EV.
+
+The first three are `ar_isp` module parameters (`saturation`, `contrast`,
+`sharpness`, percent) added by the OpenIPC builder's P1 kernel patch
+`0002-media-artosyn-isp-picture-controls.patch`, re-latched through the
+driver's debugfs `ladders` and `tone` files. Without the patch a write fails
+and the picture stays the tuned one.
+
 ## Runtime prerequisites
 
 The kernel modules `nt99235 ar-csi2 ar-vif ar-isp ar-cvisp wave5`, the
@@ -136,9 +166,10 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `video0.resilience` (intra-refresh presets, see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
+Picture controls are on `/api/v1/iq` (above), not config fields.
 Everything else — ISP tuning, AWB, audio, recording, snapshot, ROI,
 SVC-T resilience presets, slicing, debug OSD — is advertised unsupported and
 rejected: `ar9311_validate_config()` (`src/ar9311_validation.c`) and the

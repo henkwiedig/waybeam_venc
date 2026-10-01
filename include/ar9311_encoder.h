@@ -34,6 +34,8 @@ typedef struct {
 	                          * kernel patch) */
 	uint32_t min_qp;       /* 0 = driver default */
 	uint32_t max_qp;       /* 0 = driver default */
+	int mirror;            /* left-right, done by the encoder */
+	int flip;              /* upside down; both = rotated 180 degrees */
 } Ar9311EncoderParams;
 
 typedef struct {

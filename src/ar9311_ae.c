@@ -267,6 +267,22 @@ struct Ar9311Ae {
 	int have_stats;
 };
 
+uint32_t ar9311_ae_target_for_ev(double ev)
+{
+	double t;
+
+	if (!(ev >= -AR9311_AE_EV_MAX))   /* also catches NaN */
+		ev = -AR9311_AE_EV_MAX;
+	if (ev > AR9311_AE_EV_MAX)
+		ev = AR9311_AE_EV_MAX;
+	t = AR9311_AE_TARGET * pow(2.0, ev) + 0.5;
+	if (t < AR9311_AE_TARGET_MIN)
+		return AR9311_AE_TARGET_MIN;
+	if (t > AR9311_AE_TARGET_MAX)
+		return AR9311_AE_TARGET_MAX;
+	return (uint32_t)t;
+}
+
 static int write_int(const char *path, long value)
 {
 	char buf[24];
