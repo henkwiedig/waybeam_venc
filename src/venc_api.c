@@ -18,6 +18,7 @@
 #include "maruko_pipeline.h"
 #endif
 #if HAVE_BACKEND_AR9311
+#include "ar9311_runtime.h"
 #include "ar9311_validation.h"
 #endif
 #include "rtp_packetizer.h"
@@ -913,6 +914,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"sensor.index", "sensor.mode",
 			"video0.fps", "video0.size", "video0.bitrate",
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
+			"video0.resilience",
 			"isp.gain_max", "isp.gain_min",
 			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
 			"isp.anti_flicker_hz",
@@ -4189,7 +4191,8 @@ static int handle_idr_stats(int fd, const HttpRequest *req, void *ctx)
 	return httpd_send_json(fd, 200, buf);
 }
 
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610 || \
+    HAVE_BACKEND_AR9311
 static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 {
 	struct {
@@ -4248,6 +4251,25 @@ static int handle_intra_status(int fd, const HttpRequest *req, void *ctx)
 	{
 		Cv610IntraRefreshStatus st;
 		cv610_runtime_intra_refresh_status(&st);
+		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
+		s.active                = st.active;
+		s.mi_supported          = st.mi_supported;
+		s.apply_ok              = st.apply_ok;
+		s.target_ms             = st.target_ms;
+		s.total_rows            = st.total_rows;
+		s.requested_lines       = st.requested_lines;
+		s.effective_lines_per_p = st.effective_lines_per_p;
+		s.lines_clamped         = st.lines_clamped;
+		s.requested_qp          = st.requested_qp;
+		s.effective_qp          = st.effective_qp;
+		s.explicit_gop_sec      = st.explicit_gop_sec;
+		s.effective_gop_sec     = st.effective_gop_sec;
+		s.gop_auto              = st.gop_auto;
+	}
+#elif HAVE_BACKEND_AR9311
+	{
+		Ar9311IntraRefreshStatus st;
+		ar9311_runtime_intra_refresh_status(&st);
 		snprintf(s.mode_name, sizeof(s.mode_name), "%s", st.mode_name);
 		s.active                = st.active;
 		s.mi_supported          = st.mi_supported;
@@ -4381,6 +4403,23 @@ static int handle_resilience_status(int fd, const HttpRequest *req, void *ctx)
 		rp_base         = rp.base;
 		rp_enhance      = rp.enhance;
 		rp_pred         = rp.pred;
+	}
+#elif HAVE_BACKEND_AR9311
+	{
+		/* No SVC-T on wave5: refPred stays inactive and unsupported.  With
+		 * refresh on there is no periodic IDR, which the effective GOP
+		 * reports as 0 rather than the preset's nominal value. */
+		Ar9311IntraRefreshStatus st;
+		ar9311_runtime_intra_refresh_status(&st);
+		snprintf(intra_mode, sizeof(intra_mode), "%s",
+			st.mode_name[0] ? st.mode_name : "off");
+		intra_active    = st.active;
+		intra_supported = st.mi_supported;
+		intra_apply_ok  = st.apply_ok;
+		intra_lines     = st.effective_lines_per_p;
+		intra_qp        = st.effective_qp;
+		gop_auto        = st.gop_auto;
+		gop_sec         = st.effective_gop_sec;
 	}
 #endif
 
@@ -4605,7 +4644,8 @@ int venc_api_register(VencConfig *cfg, const char *backend_name,
 	r |= venc_httpd_route("GET", "/api/v1/dual/set",    handle_dual_set, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/dual/idr",    handle_dual_idr, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/idr/stats",   handle_idr_stats, NULL);
-#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610
+#if HAVE_BACKEND_STAR6E || HAVE_BACKEND_MARUKO || HAVE_BACKEND_CV610 || \
+    HAVE_BACKEND_AR9311
 	r |= venc_httpd_route("GET", "/api/v1/intra/status", handle_intra_status, NULL);
 	r |= venc_httpd_route("GET", "/api/v1/resilience/status",
 		handle_resilience_status, NULL);

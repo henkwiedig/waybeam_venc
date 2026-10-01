@@ -1,5 +1,32 @@
 # History
 
+## [0.89.0] - 2026-10-01
+
+AR9311: **intra refresh (GDR) instead of periodic IDRs.**  `contract_version`
+moves to **0.33.1**.
+
+- A 1080p60 IDR (about 270 KB, 13x a P-frame) took 70-99 ms to cross the
+  AR8030 link.  The RTP stream gapped, and the ground's decoder asked for
+  more IDRs, so playback stalled every second or two.
+- `video0.resilience` is now supported on AR9311 (restart).  `off` keeps the
+  old behaviour.  The intra-refresh-only presets (`rescue`, `quality`,
+  `sprint`, `racing`, `endurance`, `patrol`) switch the wave5 encoder to
+  cyclic CTU-row refresh with no periodic IDR.  Rows per frame come from the
+  shared `intra_refresh_compute()`, rounded so the period divides the
+  34 rows; `racing` gives 4 rows per frame and a 9-frame (150 ms) cycle.
+  SVC-T presets are rejected.  The AR9311 default config now ships `racing`.
+- Each refresh wave's head gets VPS/SPS/PPS prepended, on RTP and on
+  frame-shm.  Frame-shm meta carries the GDR position and cycle length.
+- `GET /api/v1/intra/status` and `/api/v1/resilience/status` report the
+  refresh as applied (`gop.effective_sec` 0).
+- Needs the OpenIPC builder's wave5 patch that exposes
+  `V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD(_TYPE)`.  Without it a refresh
+  preset fails the encoder open with a message that names the patch.
+- On a P1 (`racing`, 14 Mbit/s): P-frames average 28 KB and peak at 39 KB.
+  Over the radio for 60 s: 0 RTP gaps, 0 IDR requests, frame writes 6-10 ms
+  at most (70-99 ms before), capture to write 12 ms (25-31 ms), 0 camera
+  skips.  A receiver joining mid-stream heals within about 9 frames.
+
 ## [0.88.1] - 2026-10-01
 
 AR9311: **no more dropped frame at every keyframe.**  An IDR takes the encoder

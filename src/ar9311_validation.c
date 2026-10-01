@@ -28,8 +28,12 @@ static const char *validate_video(const VencConfig *cfg)
 		return "video0.min_qp/max_qp must be in range 0..51";
 	if (strcmp(v->rc_mode, "cbr") != 0)
 		return "AR9311 phase one supports video0.rc_mode=cbr only";
-	if (strcmp(v->resilience, "off") != 0)
-		return "AR9311 phase one supports video0.resilience=off only";
+	/* The intra-refresh presets map onto wave5's cyclic refresh; the
+	 * SVC-T ones (ref_base set: rally, range, fpv, ltr) need reference
+	 * structures wave5 does not offer. */
+	if (v->ref_base != 0)
+		return "AR9311 supports video0.resilience off, rescue, quality, "
+			"sprint, racing, endurance and patrol (no SVC-T presets)";
 	if (strcmp(v->framing, "off") != 0)
 		return "AR9311 phase one supports video0.framing=off only";
 	if (v->slice_count > 1)

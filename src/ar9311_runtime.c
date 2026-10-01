@@ -8,6 +8,7 @@
 #include "h26x_util.h"
 #include "hevc_rtp.h"
 #include "idr_rate_limit.h"
+#include "intra_refresh.h"
 #include "output_socket.h"
 #include "pipeline_common.h"
 #include "rtp_session.h"
@@ -20,6 +21,7 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
@@ -86,6 +88,13 @@ typedef struct {
 	uint64_t packets_sent;
 	uint64_t last_frame_us;
 	PipelineRateWatch rate_watch;
+
+	/* Cyclic intra refresh (resilience presets with an intra mode). */
+	uint8_t gdr_active;
+	uint8_t gdr_cycle_len;    /* frames per refresh wave */
+	uint8_t gdr_counter;      /* position of the next frame in the wave */
+	uint8_t *wave_buf;        /* param sets + access unit, frame-shm only */
+	size_t wave_buf_len;
 } Ar9311RunnerContext;
 
 /* The shared VencApplyCallbacks ABI carries no opaque pointer, so like every
@@ -93,6 +102,18 @@ typedef struct {
  * Published before HTTP starts, cleared after HTTP stops. */
 static Ar9311RunnerContext *g_ar9311_runner;
 static volatile sig_atomic_t g_ar9311_stop;
+
+static Ar9311IntraRefreshStatus g_ar9311_intra_status;
+static pthread_mutex_t g_ar9311_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void ar9311_runtime_intra_refresh_status(Ar9311IntraRefreshStatus *out)
+{
+	if (!out)
+		return;
+	pthread_mutex_lock(&g_ar9311_status_mutex);
+	*out = g_ar9311_intra_status;
+	pthread_mutex_unlock(&g_ar9311_status_mutex);
+}
 
 static void ar9311_signal_handler(int signo)
 {
@@ -390,7 +411,7 @@ static int ar9311_output_write(const uint8_t *header, size_t header_len,
 /* One access unit as RTP.  VPS/SPS/PPS are tracked and re-sent ahead of
  * every IDR, so a receiver can join at any IDR. */
 static void ar9311_send_rtp_frame(Ar9311RunnerContext *ctx,
-	const uint8_t *frame, size_t len)
+	const uint8_t *frame, size_t len, int wave_head)
 {
 	size_t cursor = 0;
 	const uint8_t *nal;
@@ -398,11 +419,14 @@ static void ar9311_send_rtp_frame(Ar9311RunnerContext *ctx,
 	uint16_t max_payload;
 
 	max_payload = __atomic_load_n(&ctx->max_payload_size, __ATOMIC_ACQUIRE);
+	/* A refresh wave is where a receiver can join, so it gets the
+	 * parameter sets an IDR would carry (19 = IDR_W_RADL selects them). */
+	if (wave_head)
+		(void)hevc_rtp_prepend_param_sets(&ctx->param_sets, 19, &ctx->rtp,
+			ar9311_output_write, ctx, max_payload, &ctx->rtp_stats);
 	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
 		uint8_t nal_type = h26x_util_hevc_nalu_type(nal, nal_len);
 
-		h26x_param_sets_update(&ctx->param_sets, PT_H265, nal_type,
-			nal, nal_len);
 		if (nal_type == 19 || nal_type == 20)
 			(void)hevc_rtp_prepend_param_sets(&ctx->param_sets, nal_type,
 				&ctx->rtp, ar9311_output_write, ctx, max_payload,
@@ -418,19 +442,81 @@ static void ar9311_send_rtp_frame(Ar9311RunnerContext *ctx,
 	ctx->rtp.timestamp += ctx->frame_ticks;
 }
 
-static int ar9311_frame_is_idr(const uint8_t *frame, size_t len)
+/* One pass over the access unit: cache its parameter sets (wave5 emits them
+ * only on an IDR) and report whether it is one. */
+static int ar9311_scan_frame(Ar9311RunnerContext *ctx, const uint8_t *frame,
+	size_t len)
 {
 	size_t cursor = 0;
 	const uint8_t *nal;
 	size_t nal_len;
+	int idr = 0;
 
 	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
 		uint8_t type = h26x_util_hevc_nalu_type(nal, nal_len);
 
+		h26x_param_sets_update(&ctx->param_sets, PT_H265, type, nal,
+			nal_len);
 		if (type == 19 || type == 20)
-			return 1;
+			idr = 1;
 	}
-	return 0;
+	return idr;
+}
+
+/* The access unit with VPS/SPS/PPS in front, for the frame-shm ring, whose
+ * consumer forwards whole units.  NULL when the sets are not known yet or
+ * the buffer cannot grow; the caller then writes the unit as it is. */
+static const uint8_t *ar9311_with_param_sets(Ar9311RunnerContext *ctx,
+	const uint8_t *frame, size_t len, size_t *out_len)
+{
+	static const uint8_t start[4] = { 0, 0, 0, 1 };
+	H26xParamSetRef refs[3];
+	size_t n, i, need = len;
+	uint8_t *p;
+
+	n = h26x_param_sets_get_prepend(&ctx->param_sets, PT_H265, 19, refs, 3);
+	if (n == 0)
+		return NULL;
+	for (i = 0; i < n; i++)
+		need += sizeof(start) + refs[i].len;
+	if (need > ctx->wave_buf_len) {
+		p = realloc(ctx->wave_buf, need);
+		if (!p)
+			return NULL;
+		ctx->wave_buf = p;
+		ctx->wave_buf_len = need;
+	}
+	p = ctx->wave_buf;
+	for (i = 0; i < n; i++) {
+		memcpy(p, start, sizeof(start));
+		memcpy(p + sizeof(start), refs[i].data, refs[i].len);
+		p += sizeof(start) + refs[i].len;
+	}
+	memcpy(p, frame, len);
+	*out_len = need;
+	return ctx->wave_buf;
+}
+
+/* Frame metadata and wave position.  The wave restarts at an IDR; every
+ * other frame is one band further.  Returns 1 for the first frame of a wave
+ * that is not itself an IDR. */
+static int ar9311_gdr_step(Ar9311RunnerContext *ctx, int idr,
+	VencFrameMeta *meta)
+{
+	int head;
+
+	meta->flags = idr ? VENC_FRAME_FLAG_IDR : 0;
+	if (idr || !ctx->gdr_active || ctx->gdr_cycle_len == 0) {
+		ctx->gdr_counter = 0;
+		return 0;
+	}
+	head = ctx->gdr_counter == 0;
+	meta->flags |= VENC_FRAME_FLAG_GDR;
+	meta->gdr_pos = ctx->gdr_counter;
+	meta->gdr_len = ctx->gdr_cycle_len;
+	if (++ctx->gdr_counter >= ctx->gdr_cycle_len)
+		ctx->gdr_counter = 0;
+	return head;
 }
 
 /* Every frame-shm producer measures the ring's low water: the ring
@@ -469,21 +555,35 @@ static void ar9311_observe_transport(Ar9311RunnerContext *ctx)
 static void ar9311_publish_frame(Ar9311RunnerContext *ctx,
 	const uint8_t *frame, size_t len, uint64_t capture_us)
 {
+	VencFrameMeta meta;
 	uint64_t frames;
+	int head;
 
+	memset(&meta, 0, sizeof(meta));
+	meta.pts = (uint32_t)capture_us;
+	meta.codec = VENC_FRAME_CODEC_H265;
+	/* Wave bookkeeping runs every frame, sent or not, so the position stays
+	 * true to the encoder across an output disable. */
+	head = ar9311_gdr_step(ctx, ar9311_scan_frame(ctx, frame, len), &meta);
 	ar9311_transport_begin_frame(ctx);
 	if (ctx->tx.output_enabled && ctx->frame_ring) {
-		VencFrameMeta meta;
+		const uint8_t *out = frame;
+		size_t out_len = len;
 
-		memset(&meta, 0, sizeof(meta));
-		meta.pts = (uint32_t)capture_us;
-		meta.codec = VENC_FRAME_CODEC_H265;
-		meta.flags = ar9311_frame_is_idr(frame, len) ? VENC_FRAME_FLAG_IDR : 0;
-		if (venc_frame_ring_write(ctx->frame_ring, &meta, frame,
-			(uint32_t)len) != 0)
+		if (head) {
+			const uint8_t *with = ar9311_with_param_sets(ctx, frame, len,
+				&out_len);
+
+			if (with)
+				out = with;
+			else
+				out_len = len;
+		}
+		if (venc_frame_ring_write(ctx->frame_ring, &meta, out,
+			(uint32_t)out_len) != 0)
 			__atomic_add_fetch(&ctx->output_drops, 1, __ATOMIC_RELAXED);
 	} else if (ctx->tx.output_enabled && ctx->tx.socket_handle >= 0) {
-		ar9311_send_rtp_frame(ctx, frame, len);
+		ar9311_send_rtp_frame(ctx, frame, len, head);
 	}
 	ar9311_observe_transport(ctx);
 	frames = __atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
@@ -586,6 +686,52 @@ static int ar9311_prepare(void *opaque)
 	return 0;
 }
 
+/* Map the resilience preset's intra mode onto wave5's cyclic refresh.  The
+ * shared intra_refresh_compute() gives the rows per picture for the mode's
+ * heal window; wave5 takes a period instead (it refreshes total/period rows
+ * per picture), so pick the period that gives at least those rows.  No
+ * stripe QP: wave5 has no such control, so intraRefreshQp is not read. */
+static void ar9311_plan_refresh(Ar9311RunnerContext *ctx,
+	Ar9311EncoderParams *params)
+{
+	Ar9311IntraRefreshStatus st;
+	IntraRefreshDerived d;
+	IntraRefreshMode mode;
+	uint32_t period = 0, rows = 0;
+
+	mode = intra_refresh_parse_mode(ctx->config.video0.intra_refresh_mode);
+	intra_refresh_compute(mode, AR9311_HEIGHT, AR9311_FPS,
+		ctx->config.video0.intra_refresh_lines, 0,
+		ctx->config.video0.gop_size, &d);
+	if (mode != INTRA_MODE_OFF && d.lines > 0 && d.total_rows > 0) {
+		period = d.total_rows / d.lines;
+		if (period < 1)
+			period = 1;
+		rows = d.total_rows / period;
+		ctx->gdr_active = 1;
+		ctx->gdr_cycle_len = (uint8_t)((d.total_rows + rows - 1) / rows);
+	}
+	params->refresh_period = period;
+
+	memset(&st, 0, sizeof(st));
+	snprintf(st.mode_name, sizeof(st.mode_name), "%s",
+		intra_refresh_mode_name(mode));
+	st.active = period > 0;
+	st.mi_supported = 1;
+	st.apply_ok = 1;
+	st.target_ms = d.target_ms;
+	st.total_rows = d.total_rows;
+	st.requested_lines = ctx->config.video0.intra_refresh_lines;
+	st.effective_lines_per_p = rows;
+	st.lines_clamped = d.lines_clamped;
+	st.explicit_gop_sec = ctx->config.video0.gop_size;
+	/* With refresh on there is no periodic IDR at all. */
+	st.effective_gop_sec = period ? 0.0 : ctx->config.video0.gop_size;
+	pthread_mutex_lock(&g_ar9311_status_mutex);
+	g_ar9311_intra_status = st;
+	pthread_mutex_unlock(&g_ar9311_status_mutex);
+}
+
 static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 {
 	Ar9311EncoderParams params;
@@ -597,6 +743,7 @@ static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 		ctx->config.video0.gop_size, AR9311_FPS);
 	params.min_qp = ctx->config.video0.min_qp;
 	params.max_qp = ctx->config.video0.max_qp;
+	ar9311_plan_refresh(ctx, &params);
 	if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH, AR9311_HEIGHT) != 0)
 		return -1;
 	if (ar9311_encoder_open(&ctx->encoder, &ctx->capture.geo,
@@ -777,6 +924,9 @@ static void ar9311_teardown(void *opaque)
 	/* Camera first: it stops writing the buffers the encoder imported. */
 	ar9311_capture_close(&ctx->capture);
 	ar9311_encoder_close(&ctx->encoder);
+	free(ctx->wave_buf);
+	ctx->wave_buf = NULL;
+	ctx->wave_buf_len = 0;
 }
 
 static int ar9311_map_result(int result)

@@ -88,8 +88,14 @@ static int test_validation(void)
 	failures += expect_config("ar9311_reject_inverted_qp", &cfg, 0);
 
 	valid_config(&cfg);
-	snprintf(cfg.video0.resilience, sizeof(cfg.video0.resilience), "racing");
-	failures += expect_config("ar9311_reject_resilience", &cfg, 0);
+	failures += expect_config("ar9311_accept_racing",
+		&cfg, venc_config_apply_resilience_preset("racing",
+			&cfg.video0) == 0);
+	failures += expect_config("ar9311_accept_racing_preset", &cfg, 1);
+
+	valid_config(&cfg);
+	(void)venc_config_apply_resilience_preset("range", &cfg.video0);
+	failures += expect_config("ar9311_reject_svc_preset", &cfg, 0);
 
 	valid_config(&cfg);
 	cfg.audio.enabled = true;

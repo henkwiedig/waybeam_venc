@@ -24,8 +24,10 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
 - **Encode** (`src/ar9311_encoder.c`): the wave5 mem2mem encoder imports the
   camera planes at their own strides (zero copy) and returns one Annex-B
   access unit per bitstream buffer. H.265 Main, level 4.1, CBR with
-  frame- and CU-level rate control, a 100 ms VBV window, IDR period from
-  `video0.gopSize`, VPS/SPS/PPS repeated on every IDR, no AUDs. The camera
+  frame- and CU-level rate control, a 100 ms VBV window, no AUDs. Either
+  cyclic intra refresh with no periodic IDR (`video0.resilience`, see
+  below) or an IDR period from `video0.gopSize` with VPS/SPS/PPS on every
+  IDR. The camera
   buffer's capture timestamp travels through the encoder to the frame-shm
   `pts`.
 - **Auto-exposure** (`src/ar9311_ae.c`): see below.
@@ -38,6 +40,39 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
 Validated on a P1 (RAM-booted, flashless): 1080p60 sustained with no
 skipped frames, clean decode, CBR tracking its target across 2/8/30 Mbit/s
 including live changes.
+
+## Intra refresh (GDR)
+
+A 1080p60 IDR is about 270 KB, 13 times a P-frame. Over the AR8030 link it
+took 70-99 ms to write, the RTP stream gapped, and the ground's decoder asked
+for yet another IDR: a visible stall every second or two. With a
+`video0.resilience` refresh preset the encoder never sends a periodic IDR.
+Instead every P-frame intra-codes a band of CTU rows, and the band walks down
+the picture (wave5 cyclic intra refresh, `intra_refresh_mode` CTU rows).
+
+- **Presets:** `off`, `rescue`, `quality`, `sprint`, `racing`, `endurance`,
+  `patrol`. The shared `intra_refresh_compute()` gives the rows per frame,
+  and the backend rounds them so that the period divides the 34 CTU rows of
+  1080p. For example `racing` is 4 rows per frame and a full refresh every
+  9 frames (150 ms). The presets with a base/enhance reference structure
+  (SVC-T) are rejected because wave5 has no such control. Changing the
+  preset needs a restart. `video0.gopSize` is ignored while refresh is on.
+- **Stream:** one IDR at start, and then on `GET /request/idr`. Frame-shm
+  frames carry the GDR position and cycle length in their meta. Each refresh
+  wave's head gets VPS/SPS/PPS prepended (RTP and frame-shm), so a receiver
+  that joins mid-stream can decode within one cycle.
+- **Status:** `GET /api/v1/intra/status` and `/api/v1/resilience/status`.
+  `gop.effective_sec` reads 0 when there is no periodic IDR.
+- **Kernel:** mainline wave5 has the refresh plumbing but no V4L2 control for
+  it. The OpenIPC builder adds
+  `V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD(_TYPE)` (cyclic) through a P1
+  kernel patch. On a kernel without it, a refresh preset fails the encoder
+  open and the message names the missing patch.
+
+Measured on a P1 with `racing` at 14 Mbit/s: P-frames average 28 KB and
+peak at 39 KB, and the only I-frame is 51 KB. Over the radio for 60 s:
+0 RTP gaps, 0 IDR requests from the ground, frame writes 6-10 ms at most
+(70-99 ms with IDRs), capture to write 12 ms (25-31 ms), and 0 camera skips.
 
 ## Auto-exposure
 
@@ -101,11 +136,11 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `video0.gopSize` (IDR period, max 2047 frames), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `video0.resilience` (intra-refresh presets, see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Everything else — ISP tuning, AWB, audio, recording, snapshot, ROI,
-resilience presets, slicing, debug OSD — is advertised unsupported and
+SVC-T resilience presets, slicing, debug OSD — is advertised unsupported and
 rejected: `ar9311_validate_config()` (`src/ar9311_validation.c`) and the
 field list in `src/venc_api.c` say exactly what runs.
 
