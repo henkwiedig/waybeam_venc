@@ -54,6 +54,16 @@ typedef struct {
 	unsigned gain_code;
 } Ar9311AePoint;
 
+/* Exposure compensation range, stops, and the target it may reach: +2 EV
+ * from 56 is 224, still under the clip threshold the meter counts at. */
+#define AR9311_AE_EV_MAX 2.0
+#define AR9311_AE_TARGET_MIN 8u
+#define AR9311_AE_TARGET_MAX 224u
+
+/** Metered-luma target for an exposure compensation of @p ev stops:
+ *  AR9311_AE_TARGET * 2^ev, clamped to [TARGET_MIN, TARGET_MAX]. */
+uint32_t ar9311_ae_target_for_ev(double ev);
+
 /** Gain of a sensor gain code, Q10. */
 uint32_t ar9311_ae_gain_q10(unsigned code);
 

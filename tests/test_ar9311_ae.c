@@ -236,10 +236,30 @@ static int test_flicker(void)
 	return f;
 }
 
+static int test_ev(void)
+{
+	int f = 0;
+
+	f += expect("ev 0 keeps the default target",
+		ar9311_ae_target_for_ev(0.0) == AR9311_AE_TARGET);
+	f += expect("ev +1 doubles the target",
+		ar9311_ae_target_for_ev(1.0) == 2 * AR9311_AE_TARGET);
+	f += expect("ev -1 halves the target",
+		ar9311_ae_target_for_ev(-1.0) == AR9311_AE_TARGET / 2);
+	f += expect("ev +2 stays under the clip threshold",
+		ar9311_ae_target_for_ev(2.0) == AR9311_AE_TARGET_MAX);
+	f += expect("ev beyond the range clamps",
+		ar9311_ae_target_for_ev(5.0) == AR9311_AE_TARGET_MAX &&
+		ar9311_ae_target_for_ev(-5.0) == AR9311_AE_TARGET / 4);
+	f += expect("ev NaN clamps low",
+		ar9311_ae_target_for_ev(NAN) == AR9311_AE_TARGET / 4);
+	return f;
+}
+
 int main(void)
 {
 	int failures = test_gain_and_meter() + test_split() + test_step() +
-		test_flicker();
+		test_flicker() + test_ev();
 
 	printf("ar9311 ae: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
