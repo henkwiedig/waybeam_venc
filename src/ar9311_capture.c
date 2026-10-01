@@ -18,8 +18,13 @@
  * what lets the encoder hold frames without starving it. */
 #define AR9311_CAPTURE_REQ_BUFS 8
 /* Frames the encoder may hold at once: a credit bound and, since every held
- * frame is one queued ahead of encode, a latency bound. */
-#define AR9311_CAPTURE_HELD_MAX 3
+ * frame is one queued ahead of encode, a latency bound.  4 is all the eight
+ * buffers allow (the node keeps depth + 1 = 4 under it).  An IDR takes the
+ * encoder longer than a frame period; with only 3 the frame arriving during
+ * it was dropped, once per GOP (measured on a P1: one skip every 1.04 s at a
+ * 1 s GOP, none with 4).  The extra frame only fills while the encoder
+ * catches up after a keyframe. */
+#define AR9311_CAPTURE_HELD_MAX 4
 
 /* The CVISP hold depth, read rather than assumed: running with the wrong
  * number starves the camera silently. */

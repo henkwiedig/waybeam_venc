@@ -18,8 +18,9 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   YUV420M in three planes, luma stride 2048. Eight MMAP buffers; every plane
   is exported once as a dma-buf. The node completes a buffer only while
   `depth + 1` others (`/sys/module/ar_cvisp/parameters/depth`) stay queued
-  under it, so at most three frames are out with the encoder; a frame beyond
-  that is requeued unencoded (`cameraSkips` in `/api/v1/transport/status`).
+  under it, so at most four frames are out with the encoder -- enough for it
+  to fall behind during a keyframe and catch up; a frame beyond that is
+  requeued unencoded (`cameraSkips` in `/api/v1/transport/status`).
 - **Encode** (`src/ar9311_encoder.c`): the wave5 mem2mem encoder imports the
   camera planes at their own strides (zero copy) and returns one Annex-B
   access unit per bitstream buffer. H.265 Main, level 4.1, CBR with

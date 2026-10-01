@@ -1,5 +1,16 @@
 # History
 
+## [0.88.1] - 2026-10-01
+
+AR9311: **no more dropped frame at every keyframe.**  An IDR takes the encoder
+longer than one frame period, and with at most 3 camera frames allowed out
+with the encoder the frame arriving meanwhile was dropped -- one visible
+stutter per GOP (measured on a P1: a camera skip every 1.04 s at
+`gopSize` 1.0, 22-25 per 30 s).  The limit is now 4, all that the eight
+capture buffers allow beside the camera's own depth; 0 skips in 40 s at the
+same settings.  The extra frame only fills while the encoder catches up after
+a keyframe.
+
 ## [0.88.0] - 2026-10-01
 
 AR9311: **mains anti-flicker for the AE.**  `contract_version` moves to
