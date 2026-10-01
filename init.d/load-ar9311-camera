@@ -10,8 +10,8 @@
 # and cannot be re-probed without a power cycle (a second probe returns
 # -EBUSY and leaves the codec unbound).
 #
-# Sensor exposure/gain are fixed module parameters (no AE loop yet):
-#   NT99235_EXPOSURE (lines, driver default 1123) and NT99235_GAIN.
+# NT99235_EXPOSURE (lines, driver default 1123) and NT99235_GAIN set the
+# sensor's starting point; waybeam's AE takes over from there.
 
 MODULES="nt99235 ar-csi2 ar-vif ar-isp ar-cvisp wave5"
 

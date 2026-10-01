@@ -890,16 +890,19 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	if (!canonical_key)
 		return 0;
 
-	/* AR9311 (first slice): exactly the fields ar9311_runtime.c reads.
-	 * Everything else -- ISP, audio, recording, snapshot, ROI, resilience,
-	 * slicing -- is not implemented there, so it is advertised unsupported
-	 * and rejected before mutation rather than accepted and ignored. */
+	/* AR9311: exactly the fields ar9311_runtime.c reads (the isp.* ones are
+	 * the AE limits and rate, ar9311_ae.c).  Everything else -- ISP tuning,
+	 * audio, recording, snapshot, ROI, resilience, slicing -- is not
+	 * implemented there, so it is advertised unsupported and rejected before
+	 * mutation rather than accepted and ignored. */
 	if (backend_name && strcmp(backend_name, "ar9311") == 0) {
 		static const char *const supported[] = {
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"video0.fps", "video0.size", "video0.bitrate",
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
+			"isp.gain_max", "isp.gain_min",
+			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.connected_udp",
 			"outgoing.allow_unix_encoder_stall",

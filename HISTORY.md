@@ -1,5 +1,28 @@
 # History
 
+## [0.87.0] - 2026-10-01
+
+AR9311: **auto-exposure.**  A new loop (`src/ar9311_ae.c`) meters the ISP's
+36x16 zone grid (`/sys/kernel/debug/ar-isp/stats_raw`) and drives sensor
+integration time and analogue gain through the nt99235 module parameters,
+with the ISP's gain-keyed denoise stages following the applied gain.  It is
+waybeam's own implementation against the kernel interfaces, not a port of
+MissingLynk's GPL `ml-aed`.
+
+- Centre-weighted mean luma, target 56 (linear), lowered when more than 4 %
+  of zones clip; half the log error per decision, +-8 % deadband, one
+  decision per new statistics frame at `isp.aeFps` (15 Hz default).
+- Time first up to one frame (1123 lines), then gain 1x-64x on the sensor's
+  code formula; the next code is taken only when the lower one falls more
+  than 2 % short, keeping the less noisy picture.
+- `isp.gainMax`/`gainMin`/`shutterMaxUs`/`shutterMinUs` are live AE limits on
+  AR9311, `isp.aeFps` restart-class; `GET /api/v1/ae` reports the loop.
+- On a P1: a covered lens reaches 64x within ~1 s and recovers as fast; a
+  steady scene holds without moves.  Tone-curve selection, anti-flicker and
+  AWB are not part of it yet.
+- `tests/test_ar9311_ae` (host): gain formula, metering, the time/gain split
+  and convergence on simulated scenes.
+
 ## [0.86.1] - 2026-10-01
 
 AR9311: **restarts no longer need a reboot.**  The wave5 firmware keeps state

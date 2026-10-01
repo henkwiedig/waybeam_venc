@@ -1,5 +1,6 @@
 #include "ar9311_runtime.h"
 
+#include "ar9311_ae.h"
 #include "ar9311_capture.h"
 #include "ar9311_encoder.h"
 #include "ar9311_validation.h"
@@ -39,6 +40,7 @@ typedef struct {
 	Ar9311Capture capture;
 	Ar9311Encoder encoder;
 	int held;                 /* camera buffers out with the encoder */
+	Ar9311Ae *ae;             /* NULL when AE could not start */
 
 	int socket_handle;
 	struct sockaddr_storage destination;
@@ -271,6 +273,57 @@ static int ar9311_apply_output_enabled(bool on)
 	return 0;
 }
 
+/* ── Auto-exposure limits ────────────────────────────────────────────── */
+
+static uint32_t ar9311_us_to_lines(uint32_t us, uint32_t fallback)
+{
+	uint64_t lines;
+
+	if (us == 0)
+		return fallback;
+	lines = (uint64_t)us * 1000u / AR9311_AE_LINE_NS;
+	if (lines < 1)
+		lines = 1;
+	return lines > AR9311_AE_LINES_MAX ? AR9311_AE_LINES_MAX : (uint32_t)lines;
+}
+
+/* Config limits in the AE's units.  0 means "no limit": the sensor's own
+ * range, 1 line to one frame period and 1x to 64x. */
+static void ar9311_ae_limits_from(const VencConfigIsp *isp, Ar9311AeLimits *lim)
+{
+	lim->lines_min = ar9311_us_to_lines(isp->shutter_min_us, 1);
+	lim->lines_max = ar9311_us_to_lines(isp->shutter_max_us,
+		AR9311_AE_LINES_MAX);
+	lim->gain_min_q10 = isp->gain_min ? isp->gain_min : AR9311_AE_GAIN_ONE;
+	lim->gain_max_q10 = isp->gain_max ? isp->gain_max :
+		ar9311_ae_gain_q10(AR9311_AE_GAIN_CODE_MAX);
+	if (lim->lines_min > lim->lines_max)
+		lim->lines_min = lim->lines_max;
+	if (lim->gain_min_q10 > lim->gain_max_q10)
+		lim->gain_min_q10 = lim->gain_max_q10;
+	lim->target = AR9311_AE_TARGET;
+}
+
+/* One live limit changed: the shared API has already committed it to the
+ * config, so rebuild all four from there. */
+static int ar9311_apply_ae_limit(uint32_t value)
+{
+	Ar9311RunnerContext *ctx = g_ar9311_runner;
+	Ar9311AeLimits lim;
+
+	(void)value;
+	if (!ctx || !ctx->ae)
+		return -1;
+	ar9311_ae_limits_from(&ctx->config.isp, &lim);
+	ar9311_ae_set_limits(ctx->ae, &lim);
+	return 0;
+}
+
+static char *ar9311_query_ae_info(void)
+{
+	return g_ar9311_runner ? ar9311_ae_status_json(g_ar9311_runner->ae) : NULL;
+}
+
 static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.apply_bitrate = ar9311_apply_bitrate,
 	.apply_verbose = ar9311_apply_verbose,
@@ -280,6 +333,11 @@ static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.query_transport_status = ar9311_query_transport_status,
 	.apply_server = ar9311_apply_server,
 	.apply_output_enabled = ar9311_apply_output_enabled,
+	.apply_gain_max = ar9311_apply_ae_limit,
+	.apply_gain_min = ar9311_apply_ae_limit,
+	.apply_shutter_max = ar9311_apply_ae_limit,
+	.apply_shutter_min = ar9311_apply_ae_limit,
+	.query_ae_info = ar9311_query_ae_info,
 };
 
 /* ── Output ──────────────────────────────────────────────────────────── */
@@ -562,6 +620,13 @@ static int ar9311_init(void *opaque)
 	(void)sigaction(SIGTERM, &action, NULL);
 	if (ar9311_pipeline_start(ctx) != 0)
 		return -1;
+	{
+		Ar9311AeLimits lim;
+
+		/* Non-fatal: without AE the camera keeps its fixed exposure. */
+		ar9311_ae_limits_from(&ctx->config.isp, &lim);
+		ctx->ae = ar9311_ae_start(&lim, ctx->config.isp.ae_fps);
+	}
 	if (ar9311_output_start(ctx) != 0)
 		return -1;
 	g_ar9311_runner = ctx;
@@ -701,6 +766,9 @@ static void ar9311_teardown(void *opaque)
 	venc_httpd_pause();
 	venc_httpd_stop();
 	g_ar9311_runner = NULL;
+	/* Before the camera stops: the thread reads its statistics. */
+	ar9311_ae_stop(ctx->ae);
+	ctx->ae = NULL;
 	if (ctx->encoder.streaming)
 		ar9311_drain_encoder(ctx);
 	ar9311_output_stop(ctx);
