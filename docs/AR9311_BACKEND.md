@@ -64,21 +64,29 @@ field list in `src/venc_api.c` say exactly what runs.
 
 ## Known limits
 
-- **Restart needs a reboot.** The wave5 firmware keeps hidden state across
-  encoder instances: within one boot, a second H.265 instance can come up
-  in a "garbage mode" that emits a *valid* bitstream of pure noise at about
-  2.5x the target bitrate (seen on the bench; MissingLynk
-  `docs/wave5-encoder-instance-reuse.md`). So anything that re-creates the
-  encoder — a restart-class API change (respawn), `S95waybeam restart`, a
-  crash — can leave the stream broken until the next boot. Change
-  restart-class fields in `/etc/waybeam.json` and reboot.
+- **The VPU is reset before every encoder open.** The wave5 firmware keeps
+  hidden state across encoder instances: within one boot, a later H.265
+  instance can come up in a "garbage mode" that emits a *valid* bitstream of
+  pure noise at about 2.5x the target bitrate, or watchdog (MissingLynk
+  `docs/wave5-encoder-instance-reuse.md`; reproduced on a P1). Probing an
+  instance for it does not work reliably: with a static input the garbage
+  mode can code small frames too. Instead `ar9311_encoder_open()` writes
+  `1` to `/sys/kernel/debug/wave5/recover` (MissingLynk's wave5 debug hook:
+  codec block reset + firmware re-download) whenever
+  `/sys/kernel/debug/wave5/state` lists no live instance. Verified on a P1
+  whose VPU was already poisoned: service restarts and an API respawn all
+  streamed clean video. The hook is documented upstream as an operator tool
+  because it destroys live instances; the backend only uses it when there
+  are none. Without debugfs (`load-ar9311-camera` mounts it) the reset is
+  skipped with a warning, and a restart within the boot may encode noise.
 - **No auto-exposure.** The ISP runs at the sensor driver's fixed exposure
   and gain (`nt99235` module parameters `exposure`, `gain`; see
   `load-ar9311-camera`). MissingLynk's `ml-aed` closes the AE loop through
   the same parameters; porting it is the next step for image quality.
-- The camera chain writes frames reliably on its first bring-up of a boot
-  (ml-kernel `docs/camera-stack.md`), which matches the one-instance rule
-  above.
+- Camera restarts within a boot have worked on the P1 (ml-kernel
+  `docs/camera-stack.md` reports CVISP writing only on the first bring-up
+  after a RAM boot from the vendor system, which this flashless board never
+  does).
 
 ## Build
 

@@ -8,8 +8,7 @@
 #
 # Load once per boot and never unload: wave5 uploads its firmware at probe
 # and cannot be re-probed without a power cycle (a second probe returns
-# -EBUSY and leaves the codec unbound), and the camera chain only writes
-# frames reliably on its first bring-up of a boot.
+# -EBUSY and leaves the codec unbound).
 #
 # Sensor exposure/gain are fixed module parameters (no AE loop yet):
 #   NT99235_EXPOSURE (lines, driver default 1123) and NT99235_GAIN.
@@ -23,6 +22,10 @@ loaded()
 
 start()
 {
+	# waybeam resets the VPU through wave5's debugfs hook before each
+	# encoder open (see docs/AR9311_BACKEND.md).
+	grep -q " /sys/kernel/debug " /proc/mounts ||
+		mount -t debugfs none /sys/kernel/debug
 	for m in $MODULES; do
 		loaded "$m" && continue
 		args=""

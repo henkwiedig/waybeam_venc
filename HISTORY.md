@@ -1,5 +1,21 @@
 # History
 
+## [0.86.1] - 2026-10-01
+
+AR9311: **restarts no longer need a reboot.**  The wave5 firmware keeps state
+across encoder instances, so a later instance of the same boot could stream
+a valid bitstream of pure noise.  The encoder open now resets the VPU and
+re-downloads its firmware first, through MissingLynk's wave5 debugfs hook
+(`/sys/kernel/debug/wave5/recover`), whenever no other codec instance is
+live.  On a P1 whose VPU was already poisoned, three service restarts and an
+API respawn all streamed clean video.
+
+- An instance health probe (feed one frame repeatedly, judge the P-frame
+  sizes) was tried first and dropped: with a static input the garbage mode
+  can code small frames too, so it passed noise.
+- `load-ar9311-camera` mounts debugfs; without it the reset is skipped with
+  a warning.
+
 ## [0.86.0] - 2026-09-30
 
 **New backend: AR9311** (Artosyn PROXIMA 9311, BetaFPV P1 air unit), the
@@ -21,7 +37,7 @@ backend is plain ioctl code. See `docs/AR9311_BACKEND.md`.
   `video0.bitrate`, `outgoing.*`, `system.verbose`, `/request/idr`.  One
   mode (1920x1080@60); ISP/AE, audio, recording, snapshot, ROI, resilience
   and slicing are advertised unsupported and rejected.
-- **Restarting needs a reboot on this SoC:** the wave5 firmware can bring a
+- **Restarting needed a reboot on this SoC** (fixed in 0.86.1): the wave5 firmware can bring a
   second encoder instance of the same boot up emitting a valid stream of
   noise at ~2.5x the target rate (observed on the bench), so a respawn can
   break the video until the next boot.

@@ -3,11 +3,9 @@
 # waybeam on AR9311 (BetaFPV P1): load the camera chain + wave5, then start
 # the encoder.  /etc/waybeam.json is read from its fixed path.
 #
-# Restarting waybeam without a reboot is not reliable on this SoC: the wave5
-# firmware keeps state across encoder instances, and a second H.265 instance
-# in one boot can encode noise at an inflated bitrate (see
-# docs/AR9311_BACKEND.md).  `restart` is kept for debugging; reboot to
-# recover a broken stream.
+# waybeam resets the VPU before opening its encoder, so restarts within a
+# boot stream clean video (docs/AR9311_BACKEND.md); that needs debugfs,
+# which load-ar9311-camera mounts.
 
 DAEMON="waybeam"
 RESPAWN="waybeam-resp"
