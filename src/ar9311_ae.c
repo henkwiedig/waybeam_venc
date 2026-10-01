@@ -37,6 +37,9 @@ static const char *const g_ae_ladders[] = {
 #define AE_DEADBAND 0.08
 #define AE_GAIN_STEP 0.5
 #define AE_SPLIT_SLACK 0.02
+/* Anti-flicker: a whole number of half periods may overrun the line limit
+ * by this much (60 Hz: 2 half periods are 1125 lines against 1123). */
+#define AE_FLICKER_SLACK 1.01
 
 /* ── Pure part ───────────────────────────────────────────────────────── */
 
@@ -137,6 +140,53 @@ static Ar9311AePoint point_for_code(double exposure, unsigned code,
 	return pt;
 }
 
+/* Gain code nearest to @p gain_q10 within the limits. */
+static unsigned nearest_code(double gain_q10, unsigned min_code,
+	unsigned max_code)
+{
+	unsigned lo = code_at_or_below(gain_q10 > 0 ? (uint32_t)gain_q10 : 0,
+		min_code, max_code);
+
+	if (lo < max_code &&
+	    fabs(ar9311_ae_gain_q10(lo + 1) - gain_q10) <
+		fabs(ar9311_ae_gain_q10(lo) - gain_q10))
+		return lo + 1;
+	return lo;
+}
+
+/* Mains light ripples at twice its frequency, so an integration time that is
+ * a whole number of half periods sees the same light on every row and the
+ * picture carries no bands.  Lines go down to such a multiple (never up:
+ * that would overexpose) and the gain makes up the rest.  Returns 0 when the
+ * constraint cannot apply: off, an exposure below one half period (bright,
+ * and short exposures cannot be made band-free by timing), or a line limit
+ * shorter than one half period. */
+static int split_flicker(double exposure, const Ar9311AeLimits *lim,
+	unsigned min_code, unsigned max_code, Ar9311AePoint *pt)
+{
+	double half = 1e9 / (2.0 * lim->flicker_hz) / AR9311_AE_LINE_NS;
+	double min_gain = ar9311_ae_gain_q10(min_code) / (double)AR9311_AE_GAIN_ONE;
+	double want_lines;
+	unsigned n, n_max;
+
+	if (lim->flicker_hz != 50 && lim->flicker_hz != 60)
+		return 0;
+	n_max = (unsigned)(lim->lines_max * AE_FLICKER_SLACK / half);
+	if (n_max == 0 || exposure < half * min_gain)
+		return 0;
+	want_lines = exposure / min_gain;
+	n = (unsigned)(want_lines / half);
+	if (n < 1)
+		n = 1;
+	if (n > n_max)
+		n = n_max;
+	pt->lines = (uint32_t)clamp_d(n * half + 0.5, lim->lines_min,
+		lim->lines_max);
+	pt->gain_code = nearest_code(exposure / pt->lines * AR9311_AE_GAIN_ONE,
+		min_code, max_code);
+	return 1;
+}
+
 Ar9311AePoint ar9311_ae_split(double exposure, const Ar9311AeLimits *lim)
 {
 	unsigned min_code = code_at_or_above(lim->gain_min_q10);
@@ -147,6 +197,8 @@ Ar9311AePoint ar9311_ae_split(double exposure, const Ar9311AeLimits *lim)
 
 	if (max_code < min_code)
 		max_code = min_code;
+	if (split_flicker(exposure, lim, min_code, max_code, &lo))
+		return lo;
 	lines = clamp_d(exposure, lim->lines_min, lim->lines_max);
 	need = exposure / lines * AR9311_AE_GAIN_ONE;
 	lo = point_for_code(exposure, code_at_or_below(need > 0 ? (uint32_t)need : 0,
@@ -409,14 +461,14 @@ char *ar9311_ae_status_json(Ar9311Ae *ae)
 		"\"engine\":\"ar9311\",\"statsLive\":%s,\"luma\":%.1f,"
 		"\"target\":%u,\"saturatedZones\":%u,\"lines\":%u,"
 		"\"exposureUs\":%u,\"gainCode\":%u,\"gain\":%u,"
-		"\"decisions\":%lu,\"moves\":%lu,"
+		"\"decisions\":%lu,\"moves\":%lu,\"antiFlickerHz\":%u,"
 		"\"limits\":{\"linesMin\":%u,\"linesMax\":%u,"
 		"\"gainMin\":%u,\"gainMax\":%u}}}",
 		ae->have_stats ? "true" : "false", (double)ae->meter.luma,
 		ae->limits.target, ae->meter.saturated, ae->point.lines,
 		(unsigned)((uint64_t)ae->point.lines * AR9311_AE_LINE_NS / 1000u),
 		ae->point.gain_code, ar9311_ae_gain_q10(ae->point.gain_code),
-		ae->decisions, ae->moves, ae->limits.lines_min,
+		ae->decisions, ae->moves, ae->limits.flicker_hz, ae->limits.lines_min,
 		ae->limits.lines_max, ae->limits.gain_min_q10,
 		ae->limits.gain_max_q10);
 	pthread_mutex_unlock(&ae->lock);

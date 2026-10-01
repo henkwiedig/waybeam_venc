@@ -46,6 +46,7 @@ typedef struct {
 	uint32_t lines_min, lines_max;
 	uint32_t gain_min_q10, gain_max_q10;
 	uint32_t target;
+	uint32_t flicker_hz;   /* mains anti-banding: 0 off, 50 or 60 */
 } Ar9311AeLimits;
 
 typedef struct {
@@ -62,7 +63,9 @@ int ar9311_ae_meter(const uint8_t *rro, Ar9311AeMeter *out);
 
 /** Operating point for a total exposure in line-gain units (lines x gain).
  *  Integration time first, then the largest gain code that does not
- *  overshoot, then lines again to absorb the code's rounding. */
+ *  overshoot, then lines again to absorb the code's rounding.  With
+ *  anti-flicker on and an exposure of at least one half mains period, the
+ *  lines are a whole number of half periods and the gain takes the rest. */
 Ar9311AePoint ar9311_ae_split(double exposure, const Ar9311AeLimits *lim);
 
 /** One control decision.  @p exposure is the current total (line-gain
