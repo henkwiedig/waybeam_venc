@@ -1,5 +1,33 @@
 # History
 
+## [0.84.1] - 2026-10-18
+
+CV610: the encoder no longer gets stuck one or two frames behind the sensor.
+On OS02K10 1080p100, capture -> encode sometimes sat at a flat 20.8 or 30.7 ms
+instead of 11.6 ms, for the rest of the run.
+
+- **The cause is the CBR re-encode.** It re-encodes an oversized frame, which
+  costs a whole frame of encoder time, and the encoder never catches up on its
+  own (bench: each re-encode added one frame, up to the in_depth 3 limit).
+- **An IDR request no longer produces an oversized frame.** The request resets
+  the rate control, which then started the next P-frame at QP 17-19: 250-513
+  KB at ~20 Mbit/s against ~25 KB normal, above the 512 KB frame-ring slot, and
+  re-encoded every time. The rate control now restarts from the last
+  P-frame's QP (`first_frame_start_qp`): measured 25-39 KB, no re-encode, no
+  latency step. Record-start IDRs are not seeded (they come from the drain
+  loop, and the rc param must only be written from the httpd thread).
+- **The re-encode stays enabled.** It still keeps frames in budget where that
+  matters: at 2 Mbit/s it re-encoded a 40 KB IDR to 17 KB, and it shrinks the
+  first frames after a large bitrate cut.
+- **A backlog that still happens is drained.** When the lowest capture ->
+  fetch latency over 10 access units stays above one frame period plus
+  min(half a period, 4 ms), and the stream buffer is not what is behind, the
+  channel's input rate is halved until a frame arrives at normal latency
+  again (at most 10 frame periods). Bench: +1 cleared in 33-60 ms skipping 2
+  input frames, +2 in 79 ms skipping 3; the stream stays decodable. Each event
+  is logged as `CV610 encoder backlog cleared`; after three drains in a row
+  that do not help, the self-heal turns itself off with a warning.
+
 ## [0.84.0] - 2026-09-06
 
 `record.format="hevc"` now rotates, and **neither recorder forces a keyframe

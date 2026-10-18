@@ -80,6 +80,24 @@
 #define SNS_DATA_RATE_X2 0
 #endif
 
+/* Encoder input backlog watch (cv610_backlog_observe), producer thread only.
+ * Zero-initialised with the context. */
+typedef struct {
+	uint64_t au_capture_us;   /* access unit whose chunks are arriving    */
+	uint64_t au_ready_us;     /* when its latest chunk was fetched        */
+	int au_pending;           /* ...and it has not been measured yet      */
+	uint64_t window_min_us;   /* lowest capture -> fetch in this window   */
+	uint32_t window_aus;
+	int window_output_queued; /* the stream buffer held more than 1 frame */
+	uint64_t drain_start_us;  /* 0 = not draining                         */
+	uint64_t drain_from_us;   /* window minimum that started the drain    */
+	ot_venc_chn_param drain_saved;
+	int restore_warned;
+	uint32_t heals;
+	uint32_t failures;        /* consecutive drains that did not clear it */
+	int disabled;
+} Cv610Backlog;
+
 typedef struct {
 	VencConfig config;
 	Cv610PipelineConfig pipeline;
@@ -241,6 +259,10 @@ typedef struct {
 	 * descriptors are still live and a new recording must not reuse them. */
 	int rec_reap_pending;
 	PipelineRateWatch rate_watch;
+	Cv610Backlog backlog;
+	/* start_qp of the last P slice, written by the producer thread, read by
+	 * cv610_seed_idr_start_qp() on the httpd thread.  0 = none yet. */
+	uint32_t last_p_qp;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -464,10 +486,43 @@ static int cv610_apply_max_payload_size(uint16_t size)
 	return 0;
 }
 
+/* An IDR request resets the CBR rate control, and with first_frame_start_qp
+ * at the SDK's -1 the encoder picks the next P-frame's QP itself: QP 17-19 at
+ * ~20 Mbit/s on OS02K10 1080p100, a 250-513 KB frame against ~25 KB normal
+ * and a 512 KB frame-ring slot.  (The seed does not touch the IDR itself,
+ * which intra refresh starts at its fixed request_i_qp.)  The CBR re-encode
+ * that then catches that frame costs a whole frame of encoder time, which is
+ * what leaves the encoder a frame behind (see cv610_backlog_observe).
+ * Starting the rate control from the last P-frame's QP resumes it where it
+ * was: measured 25-39 KB instead.
+ *
+ * httpd thread only: this and cv610_apply_qp_bounds() both read-modify-write
+ * the rc param, and the httpd runs one thread.  cv610_record_force_idr() runs
+ * on the drain loop and so does not seed; the backlog watch covers it. */
+static void cv610_seed_idr_start_qp(void)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	ot_venc_rc_param param;
+	uint32_t qp;
+
+	if (!ctx)
+		return;
+	qp = __atomic_load_n(&ctx->last_p_qp, __ATOMIC_RELAXED);
+	if (qp == 0 || ss_mpi_venc_get_rc_param(CV610_VENC_CHN, &param) != TD_SUCCESS)
+		return;
+	if (qp < param.h265_cbr_param.min_i_qp)
+		qp = param.h265_cbr_param.min_i_qp;
+	if (qp > param.h265_cbr_param.max_i_qp)
+		qp = param.h265_cbr_param.max_i_qp;
+	param.first_frame_start_qp = (td_s32)qp;
+	(void)ss_mpi_venc_set_rc_param(CV610_VENC_CHN, &param);
+}
+
 static int cv610_request_idr(void)
 {
 	if (!idr_rate_limit_allow(CV610_VENC_CHN))
 		return 0;
+	cv610_seed_idr_start_qp();
 	return ss_mpi_venc_request_idr(CV610_VENC_CHN, TD_TRUE) == TD_SUCCESS
 		? 0 : -1;
 }
@@ -842,6 +897,168 @@ static uint64_t cv610_capture_us_from_pts(Cv610RunnerContext *ctx, uint64_t pts)
 	}
 	mono_us = (int64_t)pts + ctx->pts_to_mono_us;
 	return mono_us > 0 ? (uint64_t)mono_us : 0;
+}
+
+/* ── Encoder input backlog self-heal ─────────────────────────────────────
+ *
+ * Anything that costs the encoder a whole frame of extra time -- measured:
+ * the CBR re-encode of an oversized frame -- can leave it one frame behind
+ * its input queue (in_depth 3, so up to +2), and at 1080p100 it does not
+ * catch up: capture -> encode sat at a flat 20.8 / 30.7 ms instead of 11.6 ms
+ * for minutes, until a restart.  Halving the channel's input rate drains it:
+ * the queue empties within a few frames and the encoder is back in step with
+ * the sensor, for about one skipped input frame per frame of backlog.  A
+ * skipped input frame is never encoded, so the stream stays decodable.
+ * Stopping and restarting the channel does not drain it -- nothing is
+ * encoded while it is stopped.
+ *
+ * Detection takes the lowest capture -> fetch latency over a window of
+ * access units: a backlog delays every frame, a large frame or a late pickup
+ * only some.  A window in which the stream buffer held more than the frame
+ * being fetched is skipped: that delay is this loop falling behind, and
+ * dropping encoder input would not fix it. */
+#define CV610_BACKLOG_WINDOW_AUS      10u
+/* +2 needs two skipped frames at half rate, four periods plus the one it
+ * takes to see the result. */
+#define CV610_BACKLOG_DRAIN_MAX_PERIODS 10u
+#define CV610_BACKLOG_MAX_FAILURES    3u
+
+static uint64_t cv610_backlog_period_us(uint32_t fps)
+{
+	return 1000000u / (fps ? fps : 30u);
+}
+
+/* A healthy frame is fetched about one period after capture (1080p100:
+ * 12 ms); a frame of backlog adds a whole period (21 ms). */
+static uint64_t cv610_backlog_threshold_us(uint32_t fps)
+{
+	uint64_t period_us = cv610_backlog_period_us(fps);
+	uint64_t margin_us = period_us / 2u < 4000u ? period_us / 2u : 4000u;
+
+	return period_us + margin_us;
+}
+
+static void cv610_backlog_drain_begin(Cv610RunnerContext *ctx)
+{
+	Cv610Backlog *b = &ctx->backlog;
+	ot_venc_chn_param param;
+	td_s32 ret;
+
+	ret = ss_mpi_venc_get_chn_param(CV610_VENC_CHN, &b->drain_saved);
+	if (ret == TD_SUCCESS) {
+		param = b->drain_saved;
+		param.frame_rate.src_frame_rate = (td_s32)ctx->pipeline.fps;
+		param.frame_rate.dst_frame_rate = (td_s32)(ctx->pipeline.fps / 2u);
+		ret = ss_mpi_venc_set_chn_param(CV610_VENC_CHN, &param);
+	}
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "WARN: CV610 encoder backlog cannot be drained "
+			"(chn param 0x%x); self-heal off\n", (unsigned)ret);
+		b->disabled = 1;
+		return;
+	}
+	b->drain_start_us = wb_monotonic_us();
+}
+
+static void cv610_backlog_drain_end(Cv610RunnerContext *ctx,
+	uint64_t latency_us, uint64_t now_us)
+{
+	Cv610Backlog *b = &ctx->backlog;
+	unsigned took_ms = (unsigned)((now_us - b->drain_start_us) / 1000u);
+
+	/* Left draining on failure, so the next access unit retries: a channel
+	 * stuck at half rate is worse than the backlog. */
+	if (ss_mpi_venc_set_chn_param(CV610_VENC_CHN, &b->drain_saved)
+			!= TD_SUCCESS) {
+		if (!b->restore_warned)
+			fprintf(stderr, "ERROR: CV610 encoder backlog drain could "
+				"not restore the input frame rate; retrying\n");
+		b->restore_warned = 1;
+		return;
+	}
+	b->drain_start_us = 0;
+	b->restore_warned = 0;
+	if (latency_us < cv610_backlog_threshold_us(ctx->pipeline.fps)) {
+		b->heals++;
+		b->failures = 0;
+		fprintf(stderr, "[waybeam] CV610 encoder backlog cleared (#%u): "
+			"capture->encode %.1f -> %.1f ms in %u ms\n",
+			(unsigned)b->heals, b->drain_from_us / 1000.0,
+			latency_us / 1000.0, took_ms);
+		return;
+	}
+	if (++b->failures >= CV610_BACKLOG_MAX_FAILURES)
+		b->disabled = 1;
+	fprintf(stderr, "WARN: CV610 encoder backlog drain did not clear it "
+		"(%.1f ms after %u ms, %u/%u)%s\n", latency_us / 1000.0, took_ms,
+		(unsigned)b->failures, CV610_BACKLOG_MAX_FAILURES,
+		b->disabled ? "; self-heal off" : "");
+}
+
+static void cv610_backlog_au_done(Cv610RunnerContext *ctx,
+	uint64_t latency_us, uint64_t now_us)
+{
+	Cv610Backlog *b = &ctx->backlog;
+	uint64_t threshold_us = cv610_backlog_threshold_us(ctx->pipeline.fps);
+
+	if (b->drain_start_us) {
+		if (latency_us < threshold_us ||
+		    now_us - b->drain_start_us >
+			CV610_BACKLOG_DRAIN_MAX_PERIODS *
+			cv610_backlog_period_us(ctx->pipeline.fps))
+			cv610_backlog_drain_end(ctx, latency_us, now_us);
+		return;
+	}
+	if (b->window_aus == 0 || latency_us < b->window_min_us)
+		b->window_min_us = latency_us;
+	if (++b->window_aus < CV610_BACKLOG_WINDOW_AUS)
+		return;
+	if (b->window_min_us > threshold_us && !b->window_output_queued) {
+		b->drain_from_us = b->window_min_us;
+		cv610_backlog_drain_begin(ctx);
+	}
+	b->window_aus = 0;
+	b->window_output_queued = 0;
+}
+
+/* Called for every fetched stream chunk.  With by_frame=n one access unit
+ * can arrive over several fetches, so it is measured at the one that ends
+ * the frame -- or, should the driver not mark it, when the next access unit
+ * starts.  Measuring late keeps a drain running a frame longer than needed:
+ * every frame period it runs skips another input frame. */
+static void cv610_backlog_observe(Cv610RunnerContext *ctx, uint64_t capture_us,
+	int frame_end, uint32_t left_stream_frames)
+{
+	Cv610Backlog *b = &ctx->backlog;
+	uint64_t now_us = wb_monotonic_us();
+
+	if (b->disabled || capture_us == 0)
+		return;
+	if (capture_us != b->au_capture_us) {
+		if (b->au_pending && b->au_ready_us > b->au_capture_us)
+			cv610_backlog_au_done(ctx,
+				b->au_ready_us - b->au_capture_us, now_us);
+		b->au_capture_us = capture_us;
+		b->au_pending = 1;
+	}
+	b->au_ready_us = now_us;
+	if (left_stream_frames > 1u)
+		b->window_output_queued = 1;
+	if (frame_end && b->au_pending && now_us > capture_us) {
+		b->au_pending = 0;
+		cv610_backlog_au_done(ctx, now_us - capture_us, now_us);
+	}
+}
+
+static int cv610_stream_has_p_slice(const ot_venc_stream *stream)
+{
+	td_u32 i;
+
+	for (i = 0; i < stream->pack_cnt; i++) {
+		if (stream->pack[i].data_type.h265_type == OT_VENC_H265_NALU_P_SLICE)
+			return 1;
+	}
+	return 0;
 }
 
 /* One observation of whatever transport is carrying video, in the shape both
@@ -2645,6 +2862,15 @@ static int cv610_run(void *opaque)
 				ctx->frames_since_idr = 0;
 			else if (ctx->frames_since_idr < UINT16_MAX)
 				ctx->frames_since_idr++;
+			if (stream.pack_cnt)
+				cv610_backlog_observe(ctx,
+					cv610_capture_us_from_pts(ctx,
+						(uint64_t)stream.pack[0].pts),
+					stream.pack[stream.pack_cnt - 1].is_frame_end,
+					status.left_stream_frames);
+			if (cv610_stream_has_p_slice(&stream))
+				__atomic_store_n(&ctx->last_p_qp,
+					stream.h265_info.start_qp, __ATOMIC_RELAXED);
 			if (!ctx->slice_census_done &&
 			    ctx->requested_slice_count > 1) {
 				uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame,
