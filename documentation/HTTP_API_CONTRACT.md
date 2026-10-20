@@ -39,6 +39,7 @@
 | `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
 | `isp.sensorBin` | true | true | true (**from 0.81.0**, PQTools `.bin` via libbin.so) |
 | `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
+| `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before) |
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
@@ -107,7 +108,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.84.2",
+    "app_version": "0.84.3",
     "contract_version": "0.31.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"

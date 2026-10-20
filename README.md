@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.84.2","backend":"star6e","contract_version":"0.31.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.84.3","backend":"star6e","contract_version":"0.31.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -651,7 +651,7 @@ cleanly; the key is silently ignored.
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
 | `video0.fps` | uint | live | Output frame rate |
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
-| `video0.bitrate` | uint | live | Target bitrate in kbps |
+| `video0.bitrate` | uint | live | Target bitrate in kbps. Floor **300 on CV610** (from 0.84.3; needs a colortrans sensor bin to hold it) and 1000 on Star6E/Maruko |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
 | `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |

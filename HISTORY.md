@@ -1,5 +1,31 @@
 # History
 
+## [0.84.3] - 2026-10-20
+
+CV610: the `video0.bitrate` floor is **300 kbps** instead of 1000. Star6E and
+Maruko keep 1000.
+
+- **What the encoder holds.** CV610 OS02K10 1080p100 with the
+  `cam_os02k10_100fps_xg1_day_colortrans.bin` sensor bin, static bench scene,
+  delivered vs target, ROI off / on (0.84.2 ROI):
+
+  | Target | ROI off | ROI on |
+  |---|---|---|
+  | 500 kbps | 490, QP 41.0 | 490, QP 39.0 |
+  | 350 kbps | 357, QP 43.4 | 353, QP 42.0 |
+  | 250 kbps | 263, QP 46.7 | 263, QP 45.0 |
+  | 200 kbps | 220, QP 49.7 | 218, QP 47.5 |
+  | 150 kbps | 204, QP 51 | 183, QP 50.5 |
+
+  So 300 leaves a margin above the point where the frame QP pins at 51. A
+  moving scene raises that point; not flight-tested yet.
+- **It needs colortrans.** With the default sensor bins the encoder delivered
+  0.6-1.3 Mbit/s when asked for 500 or 250 (bench 2026-10-02). waybeam does
+  not check which bin is loaded; a controller driving a craft without
+  colortrans should stay near 1 Mbit/s.
+- A target below the floor is still refused with 409, as before; only the
+  number changed (`VENC_BITRATE_MIN_KBPS`, now per backend).
+
 ## [0.84.2] - 2026-10-20
 
 ROI (`fpv.roiEnabled`) no longer overruns the bitrate target. A negative

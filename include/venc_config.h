@@ -32,8 +32,19 @@ extern "C" {
  * clamp (not a /set reject, so adaptive-link controllers that push low targets
  * keep working, just floored) on both the live apply_bitrate() paths and the
  * boot/reinit pipeline paths, so a persisted sub-floor bitrate can't birth the
- * encoder collapsed. */
+ * encoder collapsed.
+ *
+ * CV610 is floored at 300: with a colortrans sensor bin it held its target
+ * down to ~350 kbps at 1080p100 and stayed within 5-10% at 250-200, where
+ * the frame QP reached 51 (bench 2026-10-20, static scene).  With the
+ * default bins it delivered 0.6-1.3 Mbit/s when asked for 500 or 250
+ * (bench 2026-10-02), so a craft without colortrans should keep its
+ * controller near 1 Mbit/s. */
+#ifdef PLATFORM_CV610
+#define VENC_BITRATE_MIN_KBPS 300
+#else
 #define VENC_BITRATE_MIN_KBPS 1000
+#endif
 #define VENC_BITRATE_MAX_KBPS 200000
 
 /* Requested H.265 slices per picture.  A sanity bound, NOT the delivered
