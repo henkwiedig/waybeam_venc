@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.84.3","backend":"star6e","contract_version":"0.31.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.85.0","backend":"star6e","contract_version":"0.32.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -649,9 +649,9 @@ cleanly; the key is silently ignored.
 | Field | Type | Mutability | Description |
 |-------|------|------------|-------------|
 | `video0.rc_mode` | string | restart | `"cbr"`, `"vbr"`, `"avbr"`, `"fixqp"` |
-| `video0.fps` | uint | live | Output frame rate |
+| `video0.fps` | uint | live | Output frame rate. Restart-only on CV610, where it selects the sensor mode; decimate there with `video0.fpsDivisor` |
 | `video0.size` | string | restart | Encode resolution: `"auto"` (default, uses sensor native), `"1920x1080"`, `"720p"`, `"1080p"` |
-| `video0.bitrate` | uint | live | Target bitrate in kbps. Floor **300 on CV610** (from 0.84.3; held with a colortrans sensor bin, the default bins bottom out at ~500) and 1000 on Star6E/Maruko |
+| `video0.bitrate` | uint | live | Target bitrate in kbps. Floor **300 on CV610** (from 0.84.3; held with a colortrans sensor bin, the default bins bottom out at ~500), divided by `video0.fpsDivisor` (from 0.85.0), and 1000 on Star6E/Maruko |
 | `video0.gop_size` | double | live | GOP interval in seconds (0 = all-intra) |
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
 | `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
@@ -664,6 +664,7 @@ cleanly; the key is silently ignored.
 | `video0.stab_kalman_r` | double | restart | Smoothness (Kalman measurement noise), shared by `stab`/`stab-fill` (`0.1..50.0`; higher = smoother but laggier; preset default 2.0) |
 | `video0.stab_recenter_speed` | uint | restart | `pauseStab` glide-home rate in frames (`0..3600`, `0` = default ramp). Inert during normal stabilization — the Kalman recentres |
 | `video0.pause_stab` | bool | live | Live pause for `stab`/`stab-fill` — glides the stabilized window / floating image back to centre (software ramp, no rebind). Runtime-only (not persisted); boots `false`. No effect under `off`/`zoom-*` |
+| `video0.fps_divisor` | uint | live | **CV610 only** (from 0.85.0): encode every Nth frame the sensor delivers, `1..4`, `1` = all, and divide the `video0.bitrate` floor by N (300 -> 150 -> 75 kbps): below the floor, fewer frames at the same size. Set the bitrate with it in one request (`?video0.fpsDivisor=2&video0.bitrate=150`); a rate valid only while decimated is saved as 300. On 1080p100: 25 fps at ~120 kbps and 50 fps at ~237 kbps on target (colortrans bin, QP ~40), and the day bin, which cannot go below ~500 kbps at 100 fps, delivers ~250 at 50 fps and ~120-155 at 25 fps. Runtime-only (not persisted); boots `1`. Star6E/Maruko decimate through live `video0.fps` instead |
 
 #### Rate-control QP knobs: `qp_delta`, `min_qp`, `max_qp`
 

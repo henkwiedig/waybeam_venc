@@ -215,6 +215,7 @@ typedef struct {
 	uint32_t requested_slice_count;
 	uint32_t intra_refresh_active;
 	uint32_t applied_gop_frames;
+	uint32_t fps_divisor;       /* video0.fps_divisor in force; 0 reads as 1 */
 	uint32_t ref_census_frames;
 	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
 	uint32_t trail_n_patched;
@@ -381,6 +382,71 @@ static int cv610_apply_gop(uint32_t frames)
 	if (ret == 0)
 		ctx->applied_gop_frames = frames;
 	return ret;
+}
+
+static uint32_t cv610_fps_divisor(const Cv610RunnerContext *ctx)
+{
+	uint32_t divisor = __atomic_load_n(&ctx->fps_divisor, __ATOMIC_RELAXED);
+
+	return divisor ? divisor : 1u;
+}
+
+/* Frames per second the encoder actually takes: the sensor rate over
+ * video0.fps_divisor. */
+static uint32_t cv610_encode_fps(const Cv610RunnerContext *ctx)
+{
+	uint32_t fps = ctx->pipeline.fps / cv610_fps_divisor(ctx);
+
+	return fps ? fps : 1u;
+}
+
+/* Live frame decimation (video0.fps_divisor).  The rate controller's own
+ * frame-rate control drops input frames, so CBR spreads the same bitrate over
+ * the frames it keeps, and nothing upstream changes: sensor, ISP and VPSS
+ * keep running at pipeline.fps, so a kept frame is no older at encode than
+ * before.  Measured on the OS02K10 at 1080p100 (bench 2026-10-20): divisor 2
+ * delivers a steady 50 fps on target, capture -> encode stays ~12 ms, the GDR
+ * stream stays GDR (no IRAP in 20 s -- unlike a GOP write, see
+ * cv610_apply_gop()), and switching either way costs no more than a +-10%
+ * rate wobble for half a second.
+ *
+ * The GOP is a frame count.  Outside intra refresh it is rescaled to keep
+ * its length in seconds; under intra refresh it is left alone, and the
+ * refresh cycle -- also counted in frames -- lengthens by the divisor.
+ *
+ * The bitrate is not touched here: the caller sends it in the same request,
+ * and cv610_validate_config() divides the floor by the divisor. */
+static int cv610_apply_fps_divisor(uint32_t divisor)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	ot_venc_chn_attr attr;
+	uint32_t fps;
+	uint32_t gop;
+
+	if (!ctx || divisor < 1u || divisor > VENC_FPS_DIVISOR_MAX)
+		return -1;
+	if (divisor == cv610_fps_divisor(ctx))
+		return 0;
+	fps = ctx->pipeline.fps / divisor;
+	if (fps == 0)
+		fps = 1;
+	gop = pipeline_common_gop_frames(ctx->config.video0.gop_size, fps);
+	memset(&attr, 0, sizeof(attr));
+	if (ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS ||
+	    attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR)
+		return -1;
+	attr.rc_attr.h265_cbr.src_frame_rate = ctx->pipeline.fps;
+	attr.rc_attr.h265_cbr.dst_frame_rate = fps;
+	if (!ctx->intra_refresh_active)
+		attr.rc_attr.h265_cbr.gop = gop;
+	if (ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS)
+		return -1;
+	/* What the API will compute from the new live fps, so that
+	 * cv610_apply_gop() recognises its rollback replay. */
+	ctx->applied_gop_frames = gop;
+	__atomic_store_n(&ctx->fps_divisor, divisor, __ATOMIC_RELAXED);
+	printf("> Encoding 1 frame in %u: %u fps\n", divisor, fps);
+	return 0;
 }
 
 /* Captured on the first write so that 0 restores the driver's own default
@@ -1005,7 +1071,7 @@ static void cv610_backlog_au_done(Cv610RunnerContext *ctx,
 		if (latency_us < threshold_us ||
 		    now_us - b->drain_start_us >
 			CV610_BACKLOG_DRAIN_MAX_PERIODS *
-			cv610_backlog_period_us(ctx->pipeline.fps))
+			cv610_backlog_period_us(cv610_encode_fps(ctx)))
 			cv610_backlog_drain_end(ctx, latency_us, now_us);
 		return;
 	}
@@ -1190,7 +1256,7 @@ static void cv610_service_ring_low_water(Cv610RunnerContext *ctx,
 
 static uint32_t cv610_query_live_fps(void)
 {
-	return g_cv610_runner ? g_cv610_runner->pipeline.fps : 0;
+	return g_cv610_runner ? cv610_encode_fps(g_cv610_runner) : 0;
 }
 
 static char *cv610_query_transport_status(void)
@@ -1696,6 +1762,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.apply_verbose = cv610_apply_verbose,
 	.request_idr = cv610_request_idr,
 	.query_live_fps = cv610_query_live_fps,
+	.apply_fps_divisor = cv610_apply_fps_divisor,
 	.apply_max_payload_size = cv610_apply_max_payload_size,
 	.query_transport_status = cv610_query_transport_status,
 	.query_audio_status = cv610_query_audio_status,
@@ -1852,8 +1919,9 @@ static int cv610_send_rtp_frame(Cv610RunnerContext *ctx,
 			break;
 		}
 	}
-	/* An output failure may drop this access unit, but time still advances. */
-	ctx->rtp.timestamp += ctx->frame_ticks;
+	/* An output failure may drop this access unit, but time still advances
+	 * -- by every sensor frame since the last one, decimated or not. */
+	ctx->rtp.timestamp += ctx->frame_ticks * cv610_fps_divisor(ctx);
 	return nal_count > 0 ? status : -1;
 }
 
@@ -2477,6 +2545,7 @@ static int cv610_prepare(void *opaque)
 		&ctx->pipeline.out_width, &ctx->pipeline.out_height);
 	ctx->pipeline.keep_aspect = cfg->isp.keep_aspect ? 1 : 0;
 	ctx->pipeline.fps = mode->fps;
+	ctx->fps_divisor = 1;
 	ctx->pipeline.lanes = SNS_LANES;
 	ctx->pipeline.data_rate_x2 = SNS_DATA_RATE_X2;
 	ctx->pipeline.bayer = SNS_BAYER;
@@ -2669,13 +2738,14 @@ static void cv610_report_frame_status(Cv610RunnerContext *ctx)
 	uint64_t frames;
 
 	frames = __atomic_load_n(&ctx->frames, __ATOMIC_RELAXED);
-	if (frames != 1 && frames % ctx->pipeline.fps != 0)
+	if (frames != 1 && frames % cv610_encode_fps(ctx) != 0)
 		return;
 	cv610_audio_get_stats(ctx->audio, &audio_frames, &audio_bytes,
 		&audio_packets, &audio_drops);
 	if (ctx->debug_osd) {
 		debug_osd_begin_frame(ctx->debug_osd);
-		debug_osd_text(ctx->debug_osd, 0, "fps", "%u", ctx->pipeline.fps);
+		debug_osd_text(ctx->debug_osd, 0, "fps", "%u",
+			cv610_encode_fps(ctx));
 		debug_osd_text(ctx->debug_osd, 1, "cpu", "%d%%",
 			debug_osd_get_cpu(ctx->debug_osd));
 		debug_osd_text(ctx->debug_osd, 2, "enc", "%ux%u h265",

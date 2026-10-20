@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.31.0`
+- `contract_version`: `0.32.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -32,6 +32,7 @@
 | `video0.qpDelta` | true | true | **false** |
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
+| `video0.fpsDivisor` | **false** (live `video0.fps` decimates) | **false** (same) | true (**from 0.85.0**) |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
@@ -39,7 +40,7 @@
 | `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
 | `isp.sensorBin` | true | true | true (**from 0.81.0**, PQTools `.bin` via libbin.so) |
 | `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
-| `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before) |
+| `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before), **/ `video0.fpsDivisor` from 0.85.0** |
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
@@ -108,8 +109,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.84.3",
-    "contract_version": "0.31.0",
+    "app_version": "0.85.0",
+    "contract_version": "0.32.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -705,6 +706,26 @@ restart the process.
 process restart. The SigmaStar kernel driver does not reliably reinitialize the MIPI PHY
 when switching modes in-process. Use `/api/v1/restart` (reloads `/etc/venc.json`) or
 restart the venc process to change sensor modes.
+
+### `video0.fpsDivisor` (CV610) — Live Frame Decimation
+
+On CV610 `video0.fps` selects the sensor mode and is restart-only. `video0.fpsDivisor` (canonical `video0.fps_divisor`, uint `1..4`, live) has the encoder take every Nth frame the sensor delivers instead: the rate controller's frame-rate control (`h265_cbr.src_frame_rate` / `dst_frame_rate`) drops the others. Sensor, ISP and VPSS keep their rate, so a kept frame is no older at encode than before.
+
+**The `video0.bitrate` floor is divided by the divisor** (300 -> 150 at 2 -> 75 at 4): it is a per-frame floor, and N times fewer frames of the same size need N times less bitrate. That is the purpose — a link controller that has hit the floor (ar8030-transport tx `-D`) goes below it with fewer frames instead of overrunning the link. Send the bitrate in the same request; the pair is validated as one, so a rate below the full-rate floor is refused without the divisor, and going back to 1 needs a rate at or above 300:
+
+```bash
+curl "http://<device-ip>/api/v1/live/set?video0.fpsDivisor=2&video0.bitrate=150"   # 1080p100 -> 50 fps
+curl "http://<device-ip>/api/v1/live/set?video0.fpsDivisor=1&video0.bitrate=300"   # back to every frame
+```
+
+A divisor sent alone keeps the bitrate, and CBR then spreads it over fewer, larger frames.
+
+- **Runtime-only**, like `video0.pauseStab`: never written to `/etc/waybeam.json` (not even by a later persisting `/api/v1/set`), absent from `/api/v1/config`, boots `1`. A decimation a link controller set must not outlive a restart. Since the file boots at divisor 1, a persisting `/api/v1/set` taken while decimated saves a sub-floor bitrate as 300.
+- `/api/v1/fps/live` reports the decimated rate; `/api/v1/fps/config` the configured one.
+- No IDR: the stream stays continuous, and a GDR stream stays GDR. Outside intra refresh the GOP frame count is rescaled to keep its length in seconds; under intra refresh it is left alone (a GOP write there drops the stream out of GDR), so the refresh cycle — also counted in frames — lengthens by the divisor.
+- The RTP timestamp advances by every sensor frame, decimated or not.
+- Measured on the OS02K10 at 1080p100 (static scene), capture -> encode unchanged at ~12 ms throughout. Colortrans bin: 50 fps at ~237 kbps (P-frame QP ~40) and 25 fps at ~120 kbps (QP 38-42), on target. Day bin, which bottoms out at ~500 kbps / QP 51 at 100 fps: ~235-270 kbps at 50 fps (QP 49) and 119-156 at 25 fps (QP 48-50). Switching either way costs a +-10% rate wobble for about half a second.
+- `supported:false` on Star6E and Maruko, where `video0.fps` itself is live and decimates.
 
 ### `GET /api/v1/restart`
 
@@ -1982,6 +2003,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.32.0` (additive — live frame decimation on CV610): adds `video0.fpsDivisor` (`video0.fps_divisor`), uint `1..4`, live, runtime-only (never persisted, not in `/api/v1/config`). CV610 encodes every Nth sensor frame and divides the `video0.bitrate` floor by N; `supported:false` on Star6E and Maruko. `/api/v1/fps/live` reports the decimated rate. See "`video0.fpsDivisor` (CV610) — Live Frame Decimation".
 - `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
     Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a
     PQTools `.bin` at the fixed path `/tmp/isp_export.bin` and answers

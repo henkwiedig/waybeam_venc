@@ -51,6 +51,8 @@ typedef struct {
 	int apply_zoom_calls;
 	int apply_isp_bin_calls;
 	int apply_detect_reload_calls;
+	int apply_fps_divisor_calls;
+	uint32_t last_fps_divisor;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -276,6 +278,13 @@ static int test_apply_fps(uint32_t fps)
 	g_api_cb_state.apply_fps_calls++;
 	g_api_cb_state.last_fps = fps;
 	return g_api_cb_state.fail_fps ? -1 : 0;
+}
+
+static int test_apply_fps_divisor(uint32_t divisor)
+{
+	g_api_cb_state.apply_fps_divisor_calls++;
+	g_api_cb_state.last_fps_divisor = divisor;
+	return 0;
 }
 
 static int test_apply_gop(uint32_t gop_size)
@@ -1469,6 +1478,125 @@ static int test_live_set_endpoint_volatile_no_disk_write(void)
 			sizeof(response)) == 0);
 	CHECK("set status 200", status == 200);
 	CHECK("set disk write", access(path, F_OK) == 0);
+
+	unlink(path);
+	venc_api_set_config_path(NULL);
+	return failures;
+}
+
+/* video0.fps_divisor: live on CV610 only, range-checked, and never written
+ * to disk -- not even by a persisting /set -- so a link controller's
+ * decimation cannot outlive a restart. */
+static int test_cv610_fps_divisor_live_volatile(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	const char *path = "/tmp/test_venc_api_fps_divisor.json";
+	FILE *f;
+	char saved[16384];
+	size_t n;
+
+	CHECK("fps divisor supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.fps_divisor") == 1);
+	CHECK("fps divisor alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.fpsDivisor") == 1);
+	CHECK("fps divisor unsupported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.fps_divisor") == 0);
+	CHECK("fps divisor unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.fps_divisor") == 0);
+
+	venc_config_defaults(&cfg);
+	CHECK("fps divisor boots 1", cfg.video0.fps_divisor == 1);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+	cb.apply_verbose = test_apply_verbose;
+	cb.apply_fps_divisor = test_apply_fps_divisor;
+	unlink(path);
+	venc_api_set_config_path(path);
+
+	CHECK("live fps divisor rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.fpsDivisor=2", &status, response,
+			sizeof(response)) == 0);
+	CHECK("live fps divisor 200", status == 200);
+	CHECK("live fps divisor applied",
+		g_api_cb_state.apply_fps_divisor_calls == 1 &&
+		g_api_cb_state.last_fps_divisor == 2);
+	CHECK("live fps divisor committed", cfg.video0.fps_divisor == 2);
+	CHECK("live fps divisor no disk write", access(path, F_OK) != 0);
+
+	CHECK("fps divisor 0 rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.fpsDivisor=0", &status, response,
+			sizeof(response)) == 0);
+	CHECK("fps divisor 0 rejected", status == 409);
+	CHECK("fps divisor 5 rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.fpsDivisor=5", &status, response,
+			sizeof(response)) == 0);
+	CHECK("fps divisor 5 rejected", status == 409);
+	CHECK("fps divisor rejects never applied",
+		g_api_cb_state.apply_fps_divisor_calls == 1 &&
+		cfg.video0.fps_divisor == 2);
+
+	/* A persisting /set of anything snapshots the running config; the
+	 * divisor must not ride along. */
+	CHECK("set after divisor rc",
+		apply_set_query_http(&cfg, "cv610", &cb, "video0.bitrate=4000",
+			&status, response, sizeof(response)) == 0);
+	CHECK("set after divisor 200", status == 200);
+	f = fopen(path, "r");
+	n = f ? fread(saved, 1, sizeof(saved) - 1, f) : 0;
+	if (f)
+		fclose(f);
+	saved[n] = '\0';
+	CHECK("set after divisor wrote config", n > 0);
+	CHECK("fps divisor not persisted",
+		strstr(saved, "fpsDivisor") == NULL &&
+		strstr(saved, "fps_divisor") == NULL);
+
+	/* A bitrate only valid while decimated is saved as the full-rate
+	 * floor: the file boots at divisor 1. */
+	cfg.video0.bitrate = VENC_BITRATE_MIN_KBPS / 2;
+	CHECK("set while decimated rc",
+		apply_set_query_http(&cfg, "cv610", &cb, "system.verbose=true",
+			&status, response, sizeof(response)) == 0);
+	CHECK("set while decimated 200", status == 200);
+	CHECK("set while decimated keeps the live rate",
+		cfg.video0.bitrate == VENC_BITRATE_MIN_KBPS / 2);
+	f = fopen(path, "r");
+	n = f ? fread(saved, 1, sizeof(saved) - 1, f) : 0;
+	if (f)
+		fclose(f);
+	saved[n] = '\0';
+	{
+		char want[48];
+
+		snprintf(want, sizeof(want), "\"bitrate\": %u,",
+			(unsigned)VENC_BITRATE_MIN_KBPS);
+		CHECK("sub-floor rate saved as the floor",
+			strstr(saved, want) != NULL);
+	}
+
+	/* Without the callback the same write must fail: the field is live
+	 * only where a backend can honour it. */
+	reset_api_cb_state();
+	cb.apply_fps_divisor = NULL;
+	CHECK("fps divisor w/o callback rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.fpsDivisor=3", &status, response,
+			sizeof(response)) == 0);
+	CHECK("fps divisor w/o callback rejected", status != 200);
+	CHECK("fps divisor w/o callback unchanged",
+		cfg.video0.fps_divisor == 2);
 
 	unlink(path);
 	venc_api_set_config_path(NULL);
@@ -2739,6 +2867,7 @@ int test_venc_api(void)
 	failures += test_live_set_isp_bin_rejects_unreadable_path();
 	failures += test_live_set_isp_bin_no_callback_returns_501();
 	failures += test_live_set_endpoint_volatile_no_disk_write();
+	failures += test_cv610_fps_divisor_live_volatile();
 	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
 	failures += test_live_apply_sees_already_committed_config();

@@ -1,5 +1,41 @@
 # History
 
+## [0.85.0] - 2026-10-20
+
+CV610: **`video0.fpsDivisor`**, live frame decimation, and a `video0.bitrate`
+floor divided by it. The encoder takes every Nth frame the sensor delivers
+(`1..4`, `1` = all), and the floor drops to 300 / N kbps: below the floor, a
+link controller keeps the frame size and sends fewer frames instead of
+overrunning the link (ar8030-transport tx `-D`).
+
+- **How.** The CBR rate controller's own frame-rate control
+  (`h265_cbr.src_frame_rate` / `dst_frame_rate`, one `set_chn_attr`, as for a
+  bitrate change). Sensor, ISP and VPSS keep their rate, so a kept frame is
+  no older at encode. No IDR, and a GDR stream stays GDR (no IRAP in 20 s).
+  Outside intra refresh the GOP is rescaled to keep its length in seconds;
+  under it the GOP is left alone and the refresh cycle lengthens by the
+  divisor. The RTP timestamp advances by every sensor frame.
+- **The pair.** `?video0.fpsDivisor=2&video0.bitrate=150` is validated as
+  one; a rate below 300 is refused without the divisor, and going back to 1
+  needs a rate of 300 or more. A divisor sent alone keeps the bitrate, which
+  CBR then spreads over fewer, larger frames.
+- **What the encoder holds.** OS02K10 1080p100, static bench scene,
+  capture -> encode ~12 ms throughout:
+
+  | Bin | 50 fps | 25 fps |
+  |---|---|---|
+  | colortrans | ~237 kbps, QP ~40 | ~120 kbps, QP 38-42 |
+  | day (bottoms out at ~500 / QP 51 at 100 fps) | 235-270 kbps, QP 49 | 119-156 kbps, QP 48-50 |
+
+  Switching either way costs a +-10% rate wobble for about half a second.
+- **Runtime-only**, like `video0.pauseStab`: never persisted, not even by a
+  later `/api/v1/set`, absent from `/api/v1/config`, boots `1`. A persisting
+  set taken while decimated saves a sub-floor bitrate as 300, since the
+  file boots at every frame. `/api/v1/fps/live` reports the decimated rate.
+  Star6E and Maruko report it unsupported; their `video0.fps` is live and
+  decimates.
+- HTTP contract 0.32.0 (additive).
+
 ## [0.84.3] - 2026-10-20
 
 CV610: the `video0.bitrate` floor is **300 kbps** instead of 1000. Star6E and

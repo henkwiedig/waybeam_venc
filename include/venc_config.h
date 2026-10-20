@@ -48,6 +48,10 @@ extern "C" {
 #endif
 #define VENC_BITRATE_MAX_KBPS 200000
 
+/* video0.fps_divisor ceiling: a quarter of 1080p100 is 25 fps.  CV610
+ * divides VENC_BITRATE_MIN_KBPS by the divisor: the floor is per frame. */
+#define VENC_FPS_DIVISOR_MAX 4
+
 /* Requested H.265 slices per picture.  A sanity bound, NOT the delivered
  * count: SigmaStar takes slice height in 32-px rows and quantizes it to
  * whole CTU-64 rows, while CV610 uses its own 32-pixel LCU-row geometry.
@@ -237,6 +241,13 @@ typedef struct {
 	 * and is never written to /etc/waybeam.json.  Inert unless
 	 * framing=="stab-fill" (Star6E only). */
 	bool pause_stab;
+	/* Runtime frame decimation (MUT_LIVE, CV610 only): the encoder takes
+	 * every Nth frame the sensor delivers, 1 = all of them, and the
+	 * video0.bitrate floor drops to VENC_BITRATE_MIN_KBPS / N.  For a link
+	 * controller that has hit the floor (ar8030-transport tx -D).  Not
+	 * persisted, like pause_stab: always boots 1.  Star6E and Maruko
+	 * decimate through video0.fps, which is live there. */
+	uint8_t fps_divisor;
 } VencConfigVideo;
 
 typedef struct {

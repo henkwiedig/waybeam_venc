@@ -189,8 +189,17 @@ void venc_api_set_config_path(const char *path)
 static int venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
 {
 	char path[sizeof(g_config_path)];
+	VencConfig disk = *cfg_snapshot;
 	int is_same = 0;
 	int rc;
+
+	/* video0.fps_divisor is not saved, so the file boots at every frame.
+	 * A bitrate only valid while decimated (the floor is divided by the
+	 * divisor) is saved as the full-rate floor, or the next boot would
+	 * refuse the config. */
+	if (disk.video0.bitrate < VENC_BITRATE_MIN_KBPS &&
+	    disk.video0.fps_divisor > 1)
+		disk.video0.bitrate = VENC_BITRATE_MIN_KBPS;
 
 	pthread_mutex_lock(&g_cfg_mutex);
 	snprintf(path, sizeof(path), "%s", g_config_path);
@@ -203,7 +212,7 @@ static int venc_api_save_config_to_disk(const VencConfig *cfg_snapshot)
 	if (is_same)
 		return 0;  /* identical to last save — skip flash write */
 
-	rc = venc_config_save(path, cfg_snapshot);
+	rc = venc_config_save(path, &disk);
 	if (rc == 0) {
 		pthread_mutex_lock(&g_cfg_mutex);
 		g_last_saved = *cfg_snapshot;
@@ -457,6 +466,17 @@ static const FieldUi ui_pause_stab = {
 	"framing=off or zoom."
 };
 
+/* UI descriptor for video0.fps_divisor — runtime-only like pause_stab, so it
+ * too is rendered purely from capabilities. */
+static const FieldUi ui_fps_divisor = {
+	"Video", "FPS divisor", "number", 1, VENC_FPS_DIVISOR_MAX, 1, NULL,
+	"Encode every Nth sensor frame: 1 = all, 2 = half rate. The bitrate "
+	"floor is divided by N, so a link controller can go below it at the same "
+	"frame size. Lower the bitrate with it, or CBR spreads the same bitrate "
+	"over fewer, larger frames. Costs the longer frame interval. Applied "
+	"live, never saved; a restart comes back at 1."
+};
+
 /* UI descriptors for the RC QP bounds.  Rendered purely from capabilities —
  * these were API-only (no static SECTIONS rows). */
 static const FieldUi ui_min_qp = {
@@ -657,6 +677,8 @@ static const FieldDesc g_fields[] = {
 	 * UI metadata so the dashboard renders it data-driven (no static SECTIONS
 	 * row; it isn't in /api/v1/config). */
 	FIELD_UI(video0, pause_stab,       FT_BOOL,   MUT_LIVE, &ui_pause_stab),
+	/* Runtime frame decimation — MUT_LIVE, not persisted, CV610 only. */
+	FIELD_UI(video0, fps_divisor,      FT_UINT8,  MUT_LIVE, &ui_fps_divisor),
 	FIELD(debug,  show_osd,    FT_BOOL,   MUT_RESTART),
 	/* Attitude export over the rtp_sidecar trailer (requires imu.enabled;
 	 * Star6E only). MUT_RESTART: the estimator + trailer wiring is set up
@@ -767,6 +789,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.stabKalmanR", "video0.stab_kalman_r" },
 	{ "video0.stabAccuracy", "video0.stab_accuracy" },
 	{ "video0.pauseStab", "video0.pause_stab" },
+	{ "video0.fpsDivisor", "video0.fps_divisor" },
 	{ "outgoing.sidecarPort", "outgoing.sidecar_port" },
 	{ "outgoing.connectedUdp", "outgoing.connected_udp" },
 	{ "outgoing.allowUnixEncoderStall", "outgoing.allow_unix_encoder_stall" },
@@ -969,6 +992,13 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			 * CBR cannot hold its target in a noise-dominated scene
 			 * without room to raise QP. */
 			"video0.min_qp", "video0.max_qp",
+			/* Read by cv610_apply_fps_divisor(), live only.  Moves the
+			 * stream on this part: on the OS02K10 at 1080p100, divisor
+			 * 2 delivered 50 fps with the bitrate on target and P-frame
+			 * QP 1.8 lower at 4 Mbit/s and 4.7 lower at 1 Mbit/s, and
+			 * held a 300 kbps target the full rate overran at QP 51
+			 * (bench 2026-10-20). */
+			"video0.fps_divisor",
 			/* Read by cv610_apply_roi_qp(), live and at cold boot.
 			 * Listed only because the delta reaches the encoder and
 			 * moves the picture ON THIS PART -- a measurement on a
@@ -1046,6 +1076,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * QP is inert on the SigmaStar parts.) */
 	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
 	    strcmp(canonical_key, "video0.intra_refresh_qp") == 0)
+		return 0;
+
+	/* video0.fps_divisor is CV610's live decimation.  Star6E and Maruko
+	 * decimate through video0.fps itself, which is live there. */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.fps_divisor") == 0)
 		return 0;
 
 	/* These controls have no Maruko implementation.  Keep them in the shared
@@ -1446,6 +1482,11 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.intra_refresh_qp > 51)
 			return "video0.intra_refresh_qp must be 0..51";
 	}
+	if (strcmp(key, "video0.fps_divisor") == 0) {
+		if (cfg->video0.fps_divisor < 1 ||
+		    cfg->video0.fps_divisor > VENC_FPS_DIVISOR_MAX)
+			return "video0.fps_divisor must be 1..4";
+	}
 	if (strcmp(key, "snapshot.quality") == 0) {
 		/* JPEG q-factor range.  Backend clamps internally too, but
 		 * the validator gives a clean error response instead of a
@@ -1687,6 +1728,7 @@ typedef enum {
 	LIVE_GROUP_QP_BOUNDS,
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_QR_WINDOW,
+	LIVE_GROUP_FPS_DIVISOR,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1881,6 +1923,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_DETECT;
 	if (strcmp(canonical_key, "qr.window_ms") == 0)
 		return LIVE_GROUP_QR_WINDOW;
+	if (strcmp(canonical_key, "video0.fps_divisor") == 0)
+		return LIVE_GROUP_FPS_DIVISOR;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1928,6 +1972,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "detect.enabled/model_path/model_id/conf_thresh/nms_iou";
 	case LIVE_GROUP_QR_WINDOW:
 		return "qr.windowMs";
+	case LIVE_GROUP_FPS_DIVISOR:
+		return "video0.fpsDivisor";
 	default:
 		return "unknown";
 	}
@@ -2109,6 +2155,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_QR_WINDOW:
 		/* No callback: a new scan snapshots qr.window_ms when it opens. */
 		return 1;
+	case LIVE_GROUP_FPS_DIVISOR:
+		return g_cb->apply_fps_divisor != NULL;
 	default:
 		return 0;
 	}
@@ -2215,6 +2263,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_QR_WINDOW:
 		dst->qr.window_ms = src->qr.window_ms;
+		break;
+	case LIVE_GROUP_FPS_DIVISOR:
+		dst->video0.fps_divisor = src->video0.fps_divisor;
 		break;
 	default:
 		break;
@@ -2362,6 +2413,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 	case LIVE_GROUP_QR_WINDOW:
 		/* Committed above; the next scan snapshots the new duration. */
 		return 0;
+	case LIVE_GROUP_FPS_DIVISOR:
+		return g_cb->apply_fps_divisor(cfg->video0.fps_divisor);
 	default:
 		return -2;
 	}

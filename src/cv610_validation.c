@@ -31,7 +31,10 @@ const char *cv610_validate_config(const VencConfig *cfg)
 		cfg->video0.height);
 	if (err)
 		return err;
-	if (cfg->video0.bitrate < VENC_BITRATE_MIN_KBPS ||
+	/* The floor is per frame: encoding every Nth frame, the encoder holds
+	 * a target N times lower at the same frame size (video0.fps_divisor). */
+	if (cfg->video0.bitrate < VENC_BITRATE_MIN_KBPS /
+			(cfg->video0.fps_divisor ? cfg->video0.fps_divisor : 1u) ||
 		cfg->video0.bitrate > VENC_BITRATE_MAX_KBPS)
 		return "video0.bitrate is outside the supported range";
 	/* video0.qp_delta is NOT range-checked here, and is absent from CV610's

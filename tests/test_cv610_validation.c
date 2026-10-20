@@ -374,6 +374,21 @@ int main(void)
 	failures += expect_valid("cv610_reject_packet_shm", &cfg, 0);
 	strcpy(cfg.outgoing.server, "unix://venc_wfb");
 	failures += expect_valid("cv610_accept_unix", &cfg, 1);
+	/* The bitrate floor is per frame: video0.fps_divisor divides it. */
+	cfg.video0.bitrate = VENC_BITRATE_MIN_KBPS;
+	failures += expect_valid("cv610_accept_floor", &cfg, 1);
+	cfg.video0.bitrate = VENC_BITRATE_MIN_KBPS / 2;
+	failures += expect_valid("cv610_reject_half_floor_full_rate", &cfg, 0);
+	cfg.video0.fps_divisor = 2;
+	failures += expect_valid("cv610_accept_half_floor_half_rate", &cfg, 1);
+	cfg.video0.bitrate = VENC_BITRATE_MIN_KBPS / 2 - 1;
+	failures += expect_valid("cv610_reject_below_half_floor", &cfg, 0);
+	cfg.video0.fps_divisor = 4;
+	cfg.video0.bitrate = VENC_BITRATE_MIN_KBPS / 4;
+	failures += expect_valid("cv610_accept_quarter_floor_quarter_rate",
+		&cfg, 1);
+	cfg.video0.fps_divisor = 1;
+	cfg.video0.bitrate = 8192;
 	strcpy(cfg.video0.rc_mode, "vbr");
 	failures += expect_valid("cv610_reject_vbr", &cfg, 0);
 	strcpy(cfg.video0.rc_mode, "cbr");

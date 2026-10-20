@@ -7,7 +7,7 @@
  * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
  * code still answering 0.21.0, so every craft advertised a contract it was not
  * serving. */
-#define VENC_CONTRACT_VERSION "0.31.0"
+#define VENC_CONTRACT_VERSION "0.32.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
@@ -20,6 +20,9 @@ extern "C" {
 typedef struct {
 	int (*apply_bitrate)(uint32_t kbps);
 	int (*apply_fps)(uint32_t fps);
+	/* Encode every Nth frame the sensor delivers (video0.fps_divisor).
+	 * NULL where video0.fps itself is live (Star6E, Maruko). */
+	int (*apply_fps_divisor)(uint32_t divisor);
 	int (*apply_gop)(uint32_t gop_size);
 	int (*apply_qp_delta)(int delta);
 	int (*apply_roi_qp)(int qp);

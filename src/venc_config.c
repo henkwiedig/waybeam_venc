@@ -212,6 +212,8 @@ void venc_config_defaults(VencConfig *cfg)
 	/* Runtime-only "stab-fill" bypass — always boots false; not parsed or
 	 * serialized (a fresh stab-fill run always comes up composing). */
 	cfg->video0.pause_stab = false;
+	/* Runtime-only frame decimation -- always boots at the full rate. */
+	cfg->video0.fps_divisor = 1;
 
 	/* discovery — mDNS device beacon (_waybeam-venc._tcp) */
 	cfg->discovery.enabled = true;
