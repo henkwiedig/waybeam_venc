@@ -87,11 +87,14 @@ static inline int pipeline_common_scale_roi_qp(int qp, int level, int steps)
  * backend does have is the frame size, and the failure is far easier to see in
  * the consequence than in the cause.
  *
- * The mechanism worth catching: fpv.roiQp is a RELATIVE delta, so CBR pays for
- * the ROI discount by raising the frame's base QP roughly 1:1.  Once
- * base_qp + |roiQp| passes the controller's QP ceiling the base pins there and
- * the target is missed by multiples -- measured on a CV610 bench at 5.8x with
- * video0.max_qp 40 and 12.0x at 35, both at a roiQp of only -20.
+ * The mechanism it was written for: a negative fpv.roiQp used to be
+ * programmed as a discount on the centre, CBR paid for it by raising the
+ * frame's base QP roughly 1:1, and once base_qp + |roiQp| passed the QP
+ * ceiling the base pinned there and the target was missed by multiples --
+ * measured on a CV610 bench at 5.8x with video0.max_qp 40 and 12.0x at 35,
+ * and 25x at a 1000 kbps target, all at a roiQp of only -20.  ROI only ever
+ * raises QP now (pipeline_common_roi_region()), so it cannot cause this any
+ * more; the check stays for any other loss of rate control.
  *
  * Thresholds are compiled in, not configurable, because the measurement leaves
  * no room to tune: normal operation ran 0.96-1.06x of target across every arm,
@@ -154,6 +157,34 @@ typedef struct {
  * conversion, i.e. undefined behaviour.  Both returned SUCCESS with a garbage
  * rect.  A shared primitive should be total over its declared domain. */
 int pipeline_common_roi_band(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out);
+
+/** The regions a backend programs for fpv.roiQp: the bands above, plus a
+ * full-frame region under them when roiQp is negative.
+ *
+ * A negative roiQp is not programmed as a discount on the centre.  Every
+ * delta is lifted by |roiQp| instead, so the innermost band lands on 0 and the
+ * edges on +|roiQp| -- the same relative map, but the encoder is only ever told
+ * to spend LESS somewhere.  A discount made CBR pay for the sharper centre by
+ * raising the frame QP, and once that reached the QP ceiling the target was
+ * missed by multiples (CV610 1080p100 at 1000 kbps, roiQp -20: 3.2x to 25x
+ * depending on the scene).  With
+ * the lift the coarser edges save bits and CBR lowers the frame QP instead, so
+ * ROI can leave the rate under its target but not push it over.
+ *
+ * Negative roiQp: region 0 is the whole frame at +|roiQp| (aligned like the
+ * bands, so the bottom rows a 1080-row frame leaves over stay at delta 0),
+ * regions 1..steps are the bands, lifted.  Positive roiQp only ever raised
+ * QP, so regions 0..steps-1 are the bands unchanged.  Either way a higher
+ * index must override a lower one where regions overlap.
+ *
+ * Returns 0 and fills *out for a usable region, -1 to skip it, as
+ * pipeline_common_roi_band(). */
+#define PIPELINE_ROI_MAX_REGIONS (PIPELINE_ROI_MAX_STEPS + 1)
+
+int pipeline_common_roi_region_count(int qp, int steps);
+int pipeline_common_roi_region(uint32_t width, uint32_t height,
 	float center_frac, int qp, int steps, int index,
 	PipelineRoiBand *out);
 

@@ -1,5 +1,37 @@
 # History
 
+## [0.84.2] - 2026-10-20
+
+ROI (`fpv.roiEnabled`) no longer overruns the bitrate target. A negative
+`fpv.roiQp` is now programmed as coarser edges instead of a sharper centre.
+
+- **The cause.** ROI deltas are relative to the frame QP the rate controller
+  picks. A centre discount made CBR raise the frame QP to pay for it, and once
+  `frame QP + |roiQp|` passed 51 the frame QP pinned there. Bench, CV610
+  OS02K10 1080p100, `roiQp -20`, 1000 kbps target: **~25 Mbit/s delivered
+  (25x), every frame at QP 51**.
+- **Every delta is lifted by `|roiQp|`.** The innermost band is programmed
+  at 0, the outer bands at `|roiQp|` minus their taper, and a new full-frame
+  region at index 0 puts the rest of the frame at `+|roiQp|`
+  (`roiSteps + 1` regions, at most 5). The centre is still `|roiQp|`
+  sharper than the edges; CBR now lowers the frame QP instead of raising it.
+  Same bench: 98-100% of target at 1000, 4000, 10000 and 20000 kbps, with
+  the frame QP 2-3 lower than with ROI off (45.5 -> 42.7 at 1000 kbps,
+  33.0 -> 30.1 at 20000). `roiSteps 4` the same. Switching ROI off goes
+  straight back to target (before: ~70% for a while).
+- With the colortrans sensor bin (QP 37 at 1000 kbps): before, 5x the
+  target at QP 51 and ~220 kbps for several seconds after switching off;
+  now on target at 1000-20000 kbps with the frame QP 1.3-2.4 lower.
+- Positive `roiQp` only ever raised QP and is programmed as before.
+- The overrun warning no longer blames `roiQp`, since ROI cannot cause it now.
+- The success log line shows what is programmed:
+  `qp=-20 (centre +0, edges +20)`.
+- The full-frame region is 32-px aligned like the bands, so the bottom 24
+  rows of a 1080-row frame stay at delta 0.
+- Shared code, so Star6E and Maruko get the same region layout. Only CV610
+  has been run on hardware; the SigmaStar parts accept relative deltas of
+  0 and +20 per the SDK range, but that is not device-verified.
+
 ## [0.84.1] - 2026-10-18
 
 CV610: the encoder no longer gets stuck one or two frames behind the sensor.

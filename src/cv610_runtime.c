@@ -1309,7 +1309,7 @@ static int cv610_apply_roi_qp(int qp)
 	uint32_t width, height;
 	uint16_t steps;
 	float center_frac;
-	int i;
+	int i, regions;
 	int ok = 1;
 	int programmed = 0;
 
@@ -1327,8 +1327,8 @@ static int cv610_apply_roi_qp(int qp)
 	/* Clear first, unconditionally, so a shrinking steps count cannot leave
 	 * a stale outer band enabled -- the same order both SigmaStar backends
 	 * use.  Only the indices this backend ever writes are cleared; the part
-	 * offers OT_VENC_MAX_ROI_NUM (8) and nothing here touches 4..7. */
-	for (i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
+	 * offers OT_VENC_MAX_ROI_NUM (8) and nothing here touches 5..7. */
+	for (i = 0; i < PIPELINE_ROI_MAX_REGIONS; i++) {
 		td_s32 cret;
 
 		memset(&roi, 0, sizeof(roi));
@@ -1372,12 +1372,13 @@ static int cv610_apply_roi_qp(int qp)
 	if (center_frac < 0.1f) center_frac = 0.1f;
 	if (center_frac > 0.9f) center_frac = 0.9f;
 
-	for (i = 0; i < steps; i++) {
+	regions = pipeline_common_roi_region_count(qp, steps);
+	for (i = 0; i < regions; i++) {
 		PipelineRoiBand band;
 		ot_venc_roi_attr back;
 		td_s32 ret;
 
-		if (pipeline_common_roi_band(width, height, center_frac, qp,
+		if (pipeline_common_roi_region(width, height, center_frac, qp,
 		    steps, i, &band) != 0)
 			continue;
 
@@ -1439,8 +1440,10 @@ static int cv610_apply_roi_qp(int qp)
 	}
 
 	if (ok) {
-		printf("> ROI horizontal: %ux%u, %u steps, center=%.0f%%, qp=%+d\n",
-			width, height, steps, center_frac * 100.0f, qp);
+		printf("> ROI horizontal: %ux%u, %u steps, center=%.0f%%, "
+			"qp=%+d (centre %+d, edges %+d)\n",
+			width, height, steps, center_frac * 100.0f, qp,
+			qp < 0 ? 0 : qp, qp < 0 ? -qp : 0);
 	}
 
 	return ok ? 0 : -1;

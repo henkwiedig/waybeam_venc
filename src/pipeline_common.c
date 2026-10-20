@@ -318,19 +318,19 @@ void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
 	/* cfg->video0.bitrate is read on the encode thread while the httpd
 	 * thread may be committing a new config under g_cfg_mutex.  Deliberately
 	 * unlocked, but NOT because the field is naturally aligned -- alignment
-	 * is not a validity argument in C, and this reads bitrate more than once
-	 * plus several ROI fields that can straddle one commit.
+	 * is not a validity argument in C, and this reads bitrate more than
+	 * once, so the reads can straddle one commit.
 	 *
 	 * The argument that actually carries the weight is that no concurrently
 	 * committable value changes control flow here.  bitrate == 0 is the only
 	 * one that could (it guards below and divides further down), and
 	 * validation rejects it, defaults set 8192, and /api/v1/defaults commits
 	 * defaults -- so no HTTP path can make the field transition to 0.  The
-	 * residue is a diagnostic that may quote a target or an ROI hint from
-	 * either side of a config change, and the two-window rule bounds even
-	 * that: one window computed against a stale target cannot raise a report
-	 * on its own.  Taking the config mutex once per encoded frame to protect
-	 * a diagnostic would be the worse trade. */
+	 * residue is a diagnostic that may quote a target from either side of
+	 * a config change, and the two-window rule bounds even that: one window
+	 * computed against a stale target cannot raise a report on its own.
+	 * Taking the config mutex once per encoded frame to protect a
+	 * diagnostic would be the worse trade. */
 	if (!rw || !cfg || cfg->video0.bitrate == 0)
 		return;
 
@@ -369,16 +369,6 @@ void pipeline_common_rate_watch(PipelineRateWatch *rw, const VencConfig *cfg,
 				(unsigned long long)
 					((RATE_WATCH_WINDOW_US * RATE_WATCH_WINDOWS)
 						/ 1000000ULL));
-			if (cfg->fpv.roi_enabled && cfg->fpv.roi_qp != 0)
-				fprintf(stderr,
-					"         fpv.roiQp is %+d against a QP ceiling of "
-					"%s: the ROI delta is subtracted from the frame QP, "
-					"so the controller raises the base QP to compensate "
-					"and cannot go past that ceiling.  Reduce |roiQp| or "
-					"raise video0.maxQp.\n",
-					cfg->fpv.roi_qp,
-					cfg->video0.max_qp ? "video0.maxQp" :
-						"the encoder default");
 		}
 	} else if (ratio_x100 <= RATE_WATCH_CLEAR_X100) {
 		if (rw->reported)
@@ -437,4 +427,35 @@ int pipeline_common_roi_band(uint32_t width, uint32_t height,
 	out->height = rh;
 	out->qp = pipeline_common_scale_roi_qp(qp, level, steps);
 	return 0;
+}
+
+int pipeline_common_roi_region_count(int qp, int steps)
+{
+	return qp < 0 ? steps + 1 : steps;
+}
+
+int pipeline_common_roi_region(uint32_t width, uint32_t height,
+	float center_frac, int qp, int steps, int index,
+	PipelineRoiBand *out)
+{
+	if (qp >= 0)
+		return pipeline_common_roi_band(width, height, center_frac, qp,
+			steps, index, out);
+
+	if (index > 0) {
+		if (pipeline_common_roi_band(width, height, center_frac, qp,
+		    steps, index - 1, out) != 0)
+			return -1;
+		out->qp -= qp;
+		return 0;
+	}
+
+	if (!out || index < 0)
+		return -1;
+	out->x = 0;
+	out->y = 0;
+	out->width = roi_align_down(width, 32);
+	out->height = roi_align_down(height, 32);
+	out->qp = -qp;
+	return out->width && out->height ? 0 : -1;
 }

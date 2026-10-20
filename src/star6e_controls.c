@@ -667,7 +667,7 @@ static int request_idr_bootstrap(void)
 	return MI_VENC_RequestIdr(chn, 1) == 0 ? 0 : -1;
 }
 
-/* Compute one horizontal ROI band for step index of steps.
+/* Compute ROI region index (see pipeline_common_roi_region()).
  * Full-height bands centered horizontally, tapered QP toward edges.
  * Returns 0 if valid, -1 if region should be skipped. */
 static int compute_horizontal_roi(uint32_t width, uint32_t height,
@@ -676,7 +676,7 @@ static int compute_horizontal_roi(uint32_t width, uint32_t height,
 {
 	PipelineRoiBand band;
 
-	if (!roi || pipeline_common_roi_band(width, height, center_frac, qp,
+	if (!roi || pipeline_common_roi_region(width, height, center_frac, qp,
 	    steps, index, &band) != 0)
 		return -1;
 
@@ -698,13 +698,14 @@ static int apply_roi_qp(int qp)
 	uint32_t height = g_star6e_control_ctx.frame_height;
 	int ok = 1;
 	int programmed = 0;
+	int regions;
 	uint16_t steps;
 	float center_frac;
 
 	if (width == 0 || height == 0)
 		return -1;
 
-	for (int i = 0; i < PIPELINE_ROI_MAX_STEPS; i++) {
+	for (int i = 0; i < PIPELINE_ROI_MAX_REGIONS; i++) {
 		MI_VENC_RoiCfg_t roi = {0};
 		MI_S32 cret;
 
@@ -750,7 +751,8 @@ static int apply_roi_qp(int qp)
 	if (center_frac < 0.1f) center_frac = 0.1f;
 	if (center_frac > 0.9f) center_frac = 0.9f;
 
-	for (int i = 0; i < steps; i++) {
+	regions = pipeline_common_roi_region_count(qp, steps);
+	for (int i = 0; i < regions; i++) {
 		MI_VENC_RoiCfg_t roi = {0};
 		MI_S32 ret;
 
@@ -780,8 +782,10 @@ static int apply_roi_qp(int qp)
 	}
 
 	if (ok) {
-		printf("> ROI horizontal: %ux%u, %u steps, center=%.0f%%, qp=%+d\n",
-			width, height, steps, center_frac * 100.0f, qp);
+		printf("> ROI horizontal: %ux%u, %u steps, center=%.0f%%, "
+			"qp=%+d (centre %+d, edges %+d)\n",
+			width, height, steps, center_frac * 100.0f, qp,
+			qp < 0 ? 0 : qp, qp < 0 ? -qp : 0);
 	}
 
 	return ok ? 0 : -1;

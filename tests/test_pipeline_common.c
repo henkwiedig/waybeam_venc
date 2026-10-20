@@ -381,6 +381,58 @@ int test_pipeline_common(void)
 			CHECK("roi band frac<0 inside frame",
 				lo.x + lo.width <= 1280);
 		}
+
+		/* Negative roiQp is lifted: full frame at +|qp| at index 0,
+		 * the bands above it shifted by the same amount, so nothing
+		 * is ever programmed below the frame QP and the centre lands
+		 * on 0. */
+		CHECK("roi region count negative",
+			pipeline_common_roi_region_count(-20, 2) == 3);
+		CHECK("roi region count positive",
+			pipeline_common_roi_region_count(20, 2) == 2);
+		CHECK("roi region background rc",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, 0,
+				&b) == 0);
+		CHECK("roi region background rect",
+			b.x == 0 && b.y == 0 && b.width == 1920 &&
+			b.height == 1056);
+		CHECK("roi region background qp", b.qp == 20);
+		CHECK("roi region outer rc",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, 1,
+				&b) == 0);
+		CHECK("roi region outer qp", b.qp == 10);
+		CHECK("roi region inner rc",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, 2,
+				&b) == 0);
+		CHECK("roi region inner qp", b.qp == 0);
+		{
+			PipelineRoiBand band;
+
+			CHECK("roi region inner is the inner band",
+				pipeline_common_roi_band(1920, 1080, 0.4f, -20,
+					2, 1, &band) == 0 &&
+				band.x == b.x && band.width == b.width);
+		}
+		CHECK("roi region past count",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, 3,
+				&b) != 0);
+		CHECK("roi region index negative",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, -1,
+				&b) != 0);
+		CHECK("roi region null out",
+			pipeline_common_roi_region(1920, 1080, 0.4f, -20, 2, 0,
+				NULL) != 0);
+		for (i = 0; i < pipeline_common_roi_region_count(-20, 4); i++) {
+			CHECK("roi region never below frame qp",
+				pipeline_common_roi_region(1920, 1080, 0.35f,
+					-20, 4, i, &b) == 0 && b.qp >= 0);
+		}
+
+		/* Positive roiQp only ever raised QP: bands unchanged. */
+		CHECK("roi region positive rc",
+			pipeline_common_roi_region(1920, 1080, 0.4f, 20, 2, 1,
+				&b) == 0);
+		CHECK("roi region positive inner qp", b.qp == 20);
 	}
 
 	/* cleanup */

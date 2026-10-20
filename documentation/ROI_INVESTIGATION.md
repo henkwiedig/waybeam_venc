@@ -13,18 +13,62 @@ band gets the full QP delta.
 ```
 ┌─────┬─────┬──────────┬─────┬─────┐
 │     │     │          │     │     │
-│ qp  │ qp  │   full   │ qp  │ qp  │   full height
-│ /4  │ /2  │   qp     │ /2  │ /4  │   bands
-│     │     │ (center) │     │     │
+│ +qp │+qp/2│    0     │+qp/2│ +qp │   full height
+│     │     │ (center) │     │     │   bands
+│     │     │          │     │     │
 └─────┴─────┴──────────┴─────┴─────┘
-  edge  mid    center    mid   edge     (2 steps shown)
+  edge  mid    center    mid   edge     (2 steps, negative roiQp,
+                                         |roiQp| shown as qp)
 ```
 
-- Negative `roiQp`: higher quality in center (sharper, lower QP)
-- Positive `roiQp`: lower quality in center (softer, higher QP)
+- Negative `roiQp`: higher quality in center. **Programmed as coarser edges,
+  not a sharper centre (from 0.84.2)**: every delta is lifted by `|roiQp|`,
+  so the innermost band is at 0, the outer bands at `|roiQp|` minus their
+  taper, and a full-frame region at index 0 (below every band) puts the rest
+  of the frame at `+|roiQp|`. That is `roiSteps + 1` regions.
+- Positive `roiQp`: lower quality in center (softer, higher QP); the bands
+  are programmed as-is, `roiSteps` regions.
 - `0`: ROI disabled (all regions cleared)
 
+Why the lift: ROI deltas are relative to the frame QP the rate controller
+picks. A discount on the centre made CBR raise the frame QP to pay for it,
+and once `frame QP + |roiQp|` passed the QP ceiling the frame QP pinned there
+and the bitrate target was missed by multiples. Raising the edges instead
+lets CBR lower the frame QP, so the centre gets the bits the edges gave up
+and the target holds. CV610 bench, OS02K10 1080p100, `roiQp -20`,
+`roiSteps 2`, `roiCenter 0.4`, static scene, frame QP from the sidecar:
+
+| Target | ROI off | ROI on, before 0.84.2 | ROI on, from 0.84.2 |
+|---|---|---|---|
+| 1000 kbps | 990 kbps, QP 45.5 | **25000 kbps, QP 51** | 995 kbps, QP 42.7 |
+| 4000 kbps | 3930 kbps, QP 37.2 | | 3955 kbps, QP 35.3 |
+| 10000 kbps | 9770 kbps, QP 34.9 | | 9895 kbps, QP 32.5 |
+| 20000 kbps | 19600 kbps, QP 33.0 | | 19720 kbps, QP 30.1 |
+
+At 1000 kbps the frame QP is already close to 51, so the edges hit the
+H.265 ceiling and have little left to give: the centre gains about 3 QP
+there. `roiSteps 4` behaved the same (1000 kbps, QP 42.5-43.2).
+
+Same bench with the `cam_os02k10_100fps_xg1_day_colortrans.bin` sensor bin,
+which codes far cheaper (QP 37 instead of 45.5 at 1000 kbps):
+
+| Target | ROI off | ROI on, before 0.84.2 | ROI on, from 0.84.2 |
+|---|---|---|---|
+| 1000 kbps | 985 kbps, QP 37.2 | **4990 kbps, QP 51** | 985 kbps, QP 35.1 |
+| 4000 kbps | 3920 kbps, QP 32.1 | | 3955 kbps, QP 30.8 |
+| 10000 kbps | 9780 kbps, QP 30.0 | | 9895 kbps, QP 28.1 |
+| 20000 kbps | 19655 kbps, QP 28.3 | | 19775 kbps, QP 25.9 |
+
+After the old ROI was switched off, CBR undershot to ~220 kbps at QP 48-50
+for several seconds; with the new ROI it went straight back to target.
+The frame QP falls by only 1.3-2.4 here even though the edges have plenty of
+room below 51, so the frame QP understates how far the bits moved, or the
+rate controller only partly hands the edge savings to the centre. Not
+measured in the bitstream.
+
 All rect coordinates are aligned to 32 pixels for H.265 CTU compatibility.
+The full-frame region is aligned the same way, so on a 1080-row frame the
+bottom 24 rows are outside every region and stay at delta 0.
 
 ## Config
 
@@ -51,14 +95,15 @@ All rect coordinates are aligned to 32 pixels for H.265 CTU compatibility.
 
 With `roiCenter=0.33`, `roiQp=-18`, `roiSteps=2`:
 
-| Band | Width | QP delta |
+| Region | Width | QP delta |
 |------|-------|----------|
-| Outer (index 0) | ~67% of frame | -9 |
-| Center (index 1) | ~33% of frame | -18 |
+| Full frame (index 0) | 100% of frame | +18 |
+| Outer band (index 1) | ~67% of frame | +9 |
+| Center band (index 2) | ~33% of frame | 0 |
 
-The outer band covers the full frame width. The center band overlaps
-the middle third. Since higher-index regions override, the center gets
--18 and the edges get -9.
+The outer band covers the middle two thirds, the center band overlaps the
+middle third. Since higher-index regions override, the center gets 0, the
+ring around it +9 and the edges +18.
 
 ## Live API
 
@@ -84,7 +129,7 @@ typedef struct {
 } MI_VENC_RoiCfg_t;
 ```
 
-- Up to 4 ROI regions used (index 0-3)
+- Up to 5 ROI regions used (index 0-4)
 - `MI_VENC_Rect_t` uses `MI_U32` fields
 - Unused regions are explicitly disabled
 
