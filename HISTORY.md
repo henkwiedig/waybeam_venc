@@ -19,10 +19,13 @@ Maruko keep 1000.
 
   So 300 leaves a margin above the point where the frame QP pins at 51. A
   moving scene raises that point; not flight-tested yet.
-- **It needs colortrans.** With the default sensor bins the encoder delivered
-  0.6-1.3 Mbit/s when asked for 500 or 250 (bench 2026-10-02). waybeam does
-  not check which bin is loaded; a controller driving a craft without
-  colortrans should stay near 1 Mbit/s.
+- **Without colortrans it bottoms out higher, harmlessly.** Day bin, same
+  scene: 700 -> 711 kbps (QP 47.5), 500 -> 543 (QP 50), 400 -> 497 and
+  300 -> 514 (QP 51). The largest frame stayed at 2-2.7 KB, capture-to-send
+  latency at ~12.4 ms, no encoder backlog, and the switch back to 1000 was
+  immediate, so a controller may ask for 300 on either bin; the only trace
+  is the overrun warning in the log. The 0.6-1.3 Mbit/s with peaks to
+  2.2 Mbit/s measured on 2026-10-02 predates the 0.84.1 re-encode fix.
 - A target below the floor is still refused with 409, as before; only the
   number changed (`VENC_BITRATE_MIN_KBPS`, now per backend).
 

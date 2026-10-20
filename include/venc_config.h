@@ -37,9 +37,10 @@ extern "C" {
  * CV610 is floored at 300: with a colortrans sensor bin it held its target
  * down to ~350 kbps at 1080p100 and stayed within 5-10% at 250-200, where
  * the frame QP reached 51 (bench 2026-10-20, static scene).  With the
- * default bins it delivered 0.6-1.3 Mbit/s when asked for 500 or 250
- * (bench 2026-10-02), so a craft without colortrans should keep its
- * controller near 1 Mbit/s. */
+ * default bins it bottoms out higher, at QP 51 and ~500 kbps on the same
+ * scene: asked for 400 or 300 it delivered ~500, with no larger frames, no
+ * added latency and no encoder backlog, so a target below that is harmless
+ * there, just not met. */
 #ifdef PLATFORM_CV610
 #define VENC_BITRATE_MIN_KBPS 300
 #else
