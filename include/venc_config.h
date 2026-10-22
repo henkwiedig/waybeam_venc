@@ -52,6 +52,11 @@ extern "C" {
  * divides VENC_BITRATE_MIN_KBPS by the divisor: the floor is per frame. */
 #define VENC_FPS_DIVISOR_MAX 4
 
+/* video0.max_frame_pct range (0 = off): the largest P-frame in percent of
+ * the average frame, bitrate / encoded fps. */
+#define VENC_MAX_FRAME_PCT_MIN 100
+#define VENC_MAX_FRAME_PCT_MAX 1000
+
 /* Requested H.265 slices per picture.  A sanity bound, NOT the delivered
  * count: SigmaStar takes slice height in 32-px rows and quantizes it to
  * whole CTU-64 rows, while CV610 uses its own 32-pixel LCU-row geometry.
@@ -141,6 +146,7 @@ typedef struct {
 	int qp_delta;              /* relative I/P QP delta, -12..12 */
 	uint32_t min_qp;           /* RC QP floor; 0 = leave the driver default */
 	uint32_t max_qp;           /* RC QP ceiling; 0 = leave the driver default */
+	uint32_t max_frame_pct;    /* P-frame size cap, % of bitrate / fps; 0 = off */
 	uint16_t scene_threshold;  /* frame size spike ratio x100 for scene IDR (0=off, 150=1.5x) */
 	uint8_t scene_holdoff;     /* consecutive frames above threshold to trigger */
 	uint32_t slice_count;      /* independent H.265 slices per picture,

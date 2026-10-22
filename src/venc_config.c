@@ -650,6 +650,8 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 	if (v->qp_delta > 12) v->qp_delta = 12;
 	v->min_qp = (uint32_t)json_get_int(obj, "minQp", (int)v->min_qp);
 	v->max_qp = (uint32_t)json_get_int(obj, "maxQp", (int)v->max_qp);
+	v->max_frame_pct = (uint32_t)json_get_int(obj, "maxFramePct",
+		(int)v->max_frame_pct);
 	v->scene_threshold = (uint16_t)json_get_int(obj, "sceneThreshold",
 		(int)v->scene_threshold);
 	v->scene_holdoff = (uint8_t)json_get_int(obj, "sceneHoldoff",
@@ -1428,6 +1430,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_int(p,    2, "qpDelta",        cfg->video0.qp_delta,        0);
 	pp_field_uint(p,   2, "minQp",          cfg->video0.min_qp,          0);
 	pp_field_uint(p,   2, "maxQp",          cfg->video0.max_qp,          0);
+	pp_field_uint(p,   2, "maxFramePct",    cfg->video0.max_frame_pct,   0);
 	pp_field_uint(p,   2, "sceneThreshold", cfg->video0.scene_threshold, 0);
 	pp_field_uint(p,   2, "sceneHoldoff",   cfg->video0.scene_holdoff,   0);
 	pp_field_uint(p,   2, "sliceCount",     cfg->video0.slice_count,     0);
@@ -1684,6 +1687,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "qpDelta", cfg->video0.qp_delta);
 		cJSON_AddNumberToObject(vid, "minQp", cfg->video0.min_qp);
 		cJSON_AddNumberToObject(vid, "maxQp", cfg->video0.max_qp);
+		cJSON_AddNumberToObject(vid, "maxFramePct",
+			cfg->video0.max_frame_pct);
 		cJSON_AddNumberToObject(vid, "sceneThreshold", cfg->video0.scene_threshold);
 		cJSON_AddNumberToObject(vid, "sceneHoldoff", cfg->video0.scene_holdoff);
 		cJSON_AddNumberToObject(vid, "sliceCount", cfg->video0.slice_count);

@@ -7,7 +7,7 @@
  * and fails if they drift.  0.73.0 shipped with the document on 0.22.0 and the
  * code still answering 0.21.0, so every craft advertised a contract it was not
  * serving. */
-#define VENC_CONTRACT_VERSION "0.32.0"
+#define VENC_CONTRACT_VERSION "0.33.0"
 #include "venc_config.h"
 
 #ifdef __cplusplus
@@ -68,6 +68,10 @@ typedef struct {
 	 * scene, the ceiling governs how hard it may compress a scene change.
 	 * NULL on backends that do not implement it. */
 	int (*apply_qp_bounds)(uint32_t min_qp, uint32_t max_qp);
+	/* Cap the P-frame size at pct percent of the average frame
+	 * (video0.max_frame_pct); 0 restores the driver's default (no cap).
+	 * NULL on backends that do not implement it. */
+	int (*apply_max_frame_pct)(uint32_t pct);
 	/* Output transport observability snapshot.  Returns malloc'd JSON
 	 * string (caller frees) describing output queue fill, lifetime
 	 * delivery counters, and backpressure state.  The JSON includes a

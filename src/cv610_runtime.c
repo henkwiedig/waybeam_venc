@@ -216,6 +216,7 @@ typedef struct {
 	uint32_t intra_refresh_active;
 	uint32_t applied_gop_frames;
 	uint32_t fps_divisor;       /* video0.fps_divisor in force; 0 reads as 1 */
+	uint32_t max_frame_pct;     /* video0.max_frame_pct in force; 0 = off */
 	uint32_t ref_census_frames;
 	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
 	uint32_t trail_n_patched;
@@ -306,6 +307,11 @@ static void cv610_publish_encoder_status(
 	pthread_mutex_unlock(&g_cv610_status_mutex);
 }
 
+#define CV610_MAX_FRAME_REENCODE_FPS 60u
+#define CV610_MAX_FRAME_DISCARD_QP_DELTA 4u
+
+static int cv610_write_max_frame(const Cv610RunnerContext *ctx, int verbose);
+
 /* No qp_delta field: gop_attr.normal_p.ip_qp_delta is stored by the SDK and
  * ignored by the CBR rate controller, so writing it was a control that did
  * nothing.  CV610's I-frame lever is video0.intraRefreshQp. */
@@ -324,7 +330,10 @@ static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 	if (fields & 2u)
 		attr.rc_attr.h265_cbr.gop = gop;
 	ret = ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr);
-	return ret == TD_SUCCESS ? 0 : -1;
+	if (ret != TD_SUCCESS)
+		return -1;
+	(void)cv610_write_max_frame(g_cv610_runner, 0);
+	return 0;
 }
 
 static int cv610_apply_bitrate(uint32_t kbps)
@@ -441,6 +450,7 @@ static int cv610_apply_fps_divisor(uint32_t divisor)
 		attr.rc_attr.h265_cbr.gop = gop;
 	if (ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS)
 		return -1;
+	(void)cv610_write_max_frame(ctx, 0);
 	/* What the API will compute from the new live fps, so that
 	 * cv610_apply_gop() recognises its rollback replay. */
 	ctx->applied_gop_frames = gop;
@@ -530,6 +540,110 @@ static int cv610_apply_qp_bounds(uint32_t min_qp, uint32_t max_qp)
 		(unsigned)param.h265_cbr_param.max_qp,
 		(unsigned)g_cv610_qp_defaults.min_qp,
 		(unsigned)g_cv610_qp_defaults.max_qp);
+	return 0;
+}
+
+/* video0.max_frame_pct: the rate controller's super-frame strategy.  A
+ * P-frame bigger than pct percent of the average frame (bitrate / encoded
+ * fps) is encoded again at a higher QP, at most max_reencode_times (driver
+ * default 2) -- a scene change costs a blurrier frame instead of a late one.
+ * The link carries a frame in time proportional to its size, and a scene
+ * change emits several frames of 3-4x the average in a row, which reach the
+ * ground past their display deadline.  Measured on the OS02K10 at 1080p60
+ * over the AR8030 link, rolling-bar test pattern, 60 s each (bench
+ * 2026-10-22):
+ *
+ *   pct   P-frame p99   capture -> ground p99   frames late
+ *   off        115 kB                 72.7 ms        1.77/s
+ *   200         58 kB                 51.9 ms        0.67/s
+ *   150         57 kB                 47.6 ms        0.17/s
+ *   125         51 kB                 46.3 ms        0.05/s
+ *
+ * 2-4% of the frames were re-encoded, none was lost, and the encoder never
+ * fell behind.
+ *
+ * Above CV610_MAX_FRAME_REENCODE_FPS the encoder has no time for a second
+ * pass: at 1080p100 every re-encode left it a frame behind, and the backlog
+ * drain (cv610_backlog_observe) then skipped 252 frames a minute.  There
+ * the frame is dropped instead and the next one encoded at QP +
+ * CV610_MAX_FRAME_DISCARD_QP_DELTA, at most one in a row: a missing frame
+ * lasts only 10 ms.  Same bench at 1080p100, 150%: capture -> ground p99
+ * 68.9 -> 48.6 ms, 1.6 frames dropped a second, no backlog.  At 60 fps
+ * and below a dropped frame would be a visible repeat on a display locked
+ * to the camera, and the re-encode fits.
+ *
+ * The threshold follows the bitrate, so every set_chn_attr write -- which
+ * also resets the strategy to none -- is followed by a call here.  I-frames
+ * keep no cap: an IDR is inherently several times the average frame, and
+ * re-encoding it would only spend encoder time. */
+static int cv610_write_max_frame(const Cv610RunnerContext *ctx, int verbose)
+{
+	ot_venc_super_frame_strategy sf;
+	ot_venc_chn_attr attr;
+	uint32_t pct;
+	uint64_t bits = 0;
+	td_s32 ret;
+
+	if (!ctx)
+		return -1;
+	pct = __atomic_load_n(&ctx->max_frame_pct, __ATOMIC_RELAXED);
+	memset(&attr, 0, sizeof(attr));
+	memset(&sf, 0, sizeof(sf));
+	if (ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr) != TD_SUCCESS ||
+	    attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR ||
+	    attr.rc_attr.h265_cbr.dst_frame_rate == 0)
+		return -1;
+	/* Read first: the struct carries discard_param, which the driver
+	 * range-checks even in re-encode mode. */
+	if (ss_mpi_venc_get_super_frame_strategy(CV610_VENC_CHN, &sf) != TD_SUCCESS)
+		return -1;
+	if (pct) {
+		bits = (uint64_t)attr.rc_attr.h265_cbr.bit_rate * 1000u * pct /
+			100u / attr.rc_attr.h265_cbr.dst_frame_rate;
+		sf.super_frame_mode = OT_VENC_SUPER_FRAME_REENCODE;
+		sf.i_frame_bits_threshold = UINT32_MAX;
+		sf.p_frame_bits_threshold = (td_u32)bits;
+		sf.b_frame_bits_threshold = (td_u32)bits;
+		sf.reencode_priority = OT_VENC_REENCODE_FRAME_BITS_FIRST;
+		if (attr.rc_attr.h265_cbr.dst_frame_rate >
+		    CV610_MAX_FRAME_REENCODE_FPS) {
+			sf.super_frame_mode = OT_VENC_SUPER_FRAME_DISCARD;
+			sf.discard_param.qp_delta = CV610_MAX_FRAME_DISCARD_QP_DELTA;
+			sf.discard_param.max_lost_times = 1;
+		}
+	} else {
+		sf.super_frame_mode = OT_VENC_SUPER_FRAME_NONE;
+	}
+	ret = ss_mpi_venc_set_super_frame_strategy(CV610_VENC_CHN, &sf);
+	if (ret != TD_SUCCESS) {
+		fprintf(stderr, "ERROR: ss_mpi_venc_set_super_frame_strategy="
+			"0x%x\n", (unsigned)ret);
+		return -1;
+	}
+	if (verbose && pct)
+		printf("> maxFramePct: %u%% = P-frames up to %.1f kB "
+			"(%u kbit/s at %u fps), %s above\n", (unsigned)pct,
+			bits / 8192.0, (unsigned)attr.rc_attr.h265_cbr.bit_rate,
+			(unsigned)attr.rc_attr.h265_cbr.dst_frame_rate,
+			sf.super_frame_mode == OT_VENC_SUPER_FRAME_DISCARD ?
+			"dropped" : "re-encoded");
+	else if (verbose)
+		printf("> maxFramePct: off\n");
+	return 0;
+}
+
+static int cv610_apply_max_frame_pct(uint32_t pct)
+{
+	Cv610RunnerContext *ctx = g_cv610_runner;
+	uint32_t prev;
+
+	if (!ctx)
+		return -1;
+	prev = __atomic_exchange_n(&ctx->max_frame_pct, pct, __ATOMIC_RELAXED);
+	if (cv610_write_max_frame(ctx, 1) != 0) {
+		__atomic_store_n(&ctx->max_frame_pct, prev, __ATOMIC_RELAXED);
+		return -1;
+	}
 	return 0;
 }
 
@@ -1770,6 +1884,7 @@ static const VencApplyCallbacks g_cv610_apply_callbacks = {
 	.query_awb_info = cv610_awb_query,
 	.apply_iq_param = cv610_iq_set,
 	.apply_qp_bounds = cv610_apply_qp_bounds,
+	.apply_max_frame_pct = cv610_apply_max_frame_pct,
 	/* Unlike Star6E there is no /etc/sensors/<sensor>.bin convention to fall
 	 * back to, so an empty isp.sensorBin is a no-op rather than a resolve. */
 	.apply_isp_bin = cv610_apply_isp_bin,
@@ -2282,6 +2397,9 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 				(unsigned)ctx->config.video0.min_qp,
 				(unsigned)ctx->config.video0.max_qp);
 	}
+	if (ctx->max_frame_pct && cv610_write_max_frame(ctx, 1) != 0)
+		fprintf(stderr, "WARN: maxFramePct from config not applied "
+			"(%u)\n", (unsigned)ctx->max_frame_pct);
 	memset(&vui, 0, sizeof(vui));
 	ret = ss_mpi_venc_get_h265_vui(CV610_VENC_CHN, &vui);
 	if (ret != TD_SUCCESS)
@@ -2546,6 +2664,7 @@ static int cv610_prepare(void *opaque)
 	ctx->pipeline.keep_aspect = cfg->isp.keep_aspect ? 1 : 0;
 	ctx->pipeline.fps = mode->fps;
 	ctx->fps_divisor = 1;
+	ctx->max_frame_pct = cfg->video0.max_frame_pct;
 	ctx->pipeline.lanes = SNS_LANES;
 	ctx->pipeline.data_rate_x2 = SNS_DATA_RATE_X2;
 	ctx->pipeline.bayer = SNS_BAYER;

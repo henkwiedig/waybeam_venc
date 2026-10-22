@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.32.0`
+- `contract_version`: `0.33.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -33,6 +33,7 @@
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
 | `video0.fpsDivisor` | **false** (live `video0.fps` decimates) | **false** (same) | true (**from 0.85.0**) |
+| `video0.maxFramePct` | **false** | **false** | true (**from 0.86.0**) |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
@@ -109,8 +110,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.85.0",
-    "contract_version": "0.32.0",
+    "app_version": "0.86.0",
+    "contract_version": "0.33.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -726,6 +727,19 @@ A divisor sent alone keeps the bitrate, and CBR then spreads it over fewer, larg
 - The RTP timestamp advances by every sensor frame, decimated or not.
 - Measured on the OS02K10 at 1080p100 (static scene), capture -> encode unchanged at ~12 ms throughout. Colortrans bin: 50 fps at ~237 kbps (P-frame QP ~40) and 25 fps at ~120 kbps (QP 38-42), on target. Day bin, which bottoms out at ~500 kbps / QP 51 at 100 fps: ~235-270 kbps at 50 fps (QP 49) and 119-156 at 25 fps (QP 48-50). Switching either way costs a +-10% rate wobble for about half a second.
 - `supported:false` on Star6E and Maruko, where `video0.fps` itself is live and decimates.
+
+### `video0.maxFramePct` (CV610) — P-Frame Size Cap
+
+`video0.maxFramePct` (canonical `video0.max_frame_pct`, uint, `0` = off, else `100..1000`, live, persisted) caps a P-frame at that percent of the average frame, `video0.bitrate` over the encoded frame rate. It is the rate controller's super-frame strategy (`ss_mpi_venc_set_super_frame_strategy`): an oversized frame is encoded again at a higher QP (frame bits first, at most the driver's two re-encodes). Above 60 encoded fps it is dropped instead, and the next frame encoded at QP + 4, at most one in a row: at 1080p100 the encoder has no time for a second pass, and every re-encode left it a frame behind.
+
+```bash
+curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
+```
+
+- **Why.** The link carries a frame in time proportional to its size, so a scene change that emits several 3-4x frames in a row delivers them 30-40 ms late, past the ground's display deadline. A capped frame is blurrier instead of late.
+- **Measured** on the OS02K10 over the AR8030 link, rolling-bar test pattern, 60 s each. 1080p60 (re-encode): off -> 200 / 150 / 125: P-frame p99 115 -> 58 / 57 / 51 kB, capture -> ground p99 72.7 -> 51.9 / 47.6 / 46.3 ms, frames late at the display 1.77 -> 0.67 / 0.17 / 0.05 a second, 2-4% of the frames re-encoded, none lost. 1080p100 at 150 (drop): p99 68.9 -> 48.6 ms, 1.6 frames dropped a second, no encoder backlog.
+- The threshold follows every live bitrate and `video0.fpsDivisor` change. I-frames are never capped.
+- `supported:false` on Star6E and Maruko.
 
 ### `GET /api/v1/restart`
 
@@ -2003,6 +2017,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.33.0` (additive — P-frame size cap on CV610): adds `video0.maxFramePct` (`video0.max_frame_pct`), uint `0` (off) or `100..1000`, live, persisted. CV610 re-encodes a P-frame above that percent of the average frame, or drops it above 60 encoded fps; `supported:false` on Star6E and Maruko. See "`video0.maxFramePct` (CV610) — P-Frame Size Cap".
 - `0.32.0` (additive — live frame decimation on CV610): adds `video0.fpsDivisor` (`video0.fps_divisor`), uint `1..4`, live, runtime-only (never persisted, not in `/api/v1/config`). CV610 encodes every Nth sensor frame and divides the `video0.bitrate` floor by N; `supported:false` on Star6E and Maruko. `/api/v1/fps/live` reports the decimated rate. See "`video0.fpsDivisor` (CV610) — Live Frame Decimation".
 - `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):
     Adds `GET /api/v1/iq/export_bin`, which writes the live ISP state to a

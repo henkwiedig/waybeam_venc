@@ -391,7 +391,7 @@ curl http://<device-ip>:<port>/api/v1/version
 ```
 
 ```json
-{"ok":true,"data":{"app_version":"0.85.0","backend":"star6e","contract_version":"0.32.0","config_schema_version":"1.0.0"}}
+{"ok":true,"data":{"app_version":"0.86.0","backend":"star6e","contract_version":"0.33.0","config_schema_version":"1.0.0"}}
 ```
 
 #### GET /api/v1/config
@@ -656,6 +656,7 @@ cleanly; the key is silently ignored.
 | `video0.qp_delta` | int | live | I-frame QP relative to P (-12..12). **More negative = smaller I-frames**, at constant bitrate. Inert on CV610 — see below |
 | `video0.min_qp` | uint | live | QP floor, i.e. a **bit ceiling** (0 = driver default). All three backends. Collapses the stream once it binds — see below |
 | `video0.max_qp` | uint | live | QP ceiling, i.e. a **bit floor** (0 = driver default). All three backends. Overshoots the target once it binds — see below |
+| `video0.max_frame_pct` | uint | live | **CV610 only** (from 0.86.0): largest P-frame in percent of the average frame (bitrate / encoded fps), `0` = off, else `100..1000`. A bigger frame is re-encoded at a higher QP, or dropped (next frame QP +4) above 60 encoded fps, where the encoder has no time for a second pass. A scene change then costs a blurrier frame instead of one that arrives late. 1080p60 over the AR8030 link, rolling-bar test pattern: `150` took the P-frame p99 from 115 to 57 kB, capture -> ground p99 from 72.7 to 47.6 ms and late frames from 1.77 to 0.17 a second; 1080p100: 68.9 -> 48.6 ms. I-frames are never capped |
 | `video0.framing` | string | restart | VPE crop mode: `off`, `stab`, `stab-fill`, `zoom-1.25x`, `zoom-1.50x`, `zoom-1.75x`, `zoom-2x`, `zoom-3x`, `zoom-4x` (see Framing below) |
 | `video0.zoom_x` | double | live | Pan crop center X (`0.0` left to `1.0` right) — applies to `zoom-*` modes only |
 | `video0.zoom_y` | double | live | Pan crop center Y (`0.0` top to `1.0` bottom) — applies to `zoom-*` modes only |
@@ -753,6 +754,7 @@ overshoot.
 | `video0.qp_delta` | yes | yes | **not offered** |
 | `video0.min_qp` / `max_qp` | yes | yes | yes |
 | `video0.intra_refresh_qp` | **inert, not offered** | **inert, not offered** | yes |
+| `video0.max_frame_pct` | **not offered** | **not offered** | yes **from 0.86.0** |
 | `fpv.roi_*` | yes | yes | yes **from 0.76.0** |
 | `outgoing.sidecar_port` | yes | yes | yes **from 0.74.0** |
 

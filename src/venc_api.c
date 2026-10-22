@@ -487,6 +487,14 @@ static const FieldUi ui_max_qp = {
 	"Video", "Max QP", "number", 0, 51, 1, NULL,
 	"RC QP ceiling. 0 = leave the SDK default. Raising the ceiling lets the encoder compress a scene change hard enough to stay inside the frame budget instead of emitting a burst frame. Applied live."
 };
+static const FieldUi ui_max_frame_pct = {
+	"Video", "Max frame size %", "number", 0, VENC_MAX_FRAME_PCT_MAX, 10, NULL,
+	"Largest P-frame, in percent of the average frame (bitrate / fps). A "
+	"bigger frame is re-encoded at a higher QP, so a scene change costs a "
+	"blurrier frame instead of a late one: the link takes a 4x frame 4x as "
+	"long to carry. 0 = off. 150 is a good start; below ~130 normal motion "
+	"starts to trip it. Applied live."
+};
 static const FieldUi ui_intra_refresh_qp = {
 	"Video", "Intra-refresh QP", "number", 0, 51, 1, NULL,
 	"QP of the GDR intra-refresh stripe — the quality of the recovery "
@@ -588,6 +596,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, qp_delta,        FT_INT,    MUT_LIVE),
 	FIELD_UI(video0, min_qp,       FT_UINT,   MUT_LIVE, &ui_min_qp),
 	FIELD_UI(video0, max_qp,       FT_UINT,   MUT_LIVE, &ui_max_qp),
+	FIELD_UI(video0, max_frame_pct, FT_UINT,  MUT_LIVE, &ui_max_frame_pct),
 	FIELD(outgoing, enabled,           FT_BOOL,   MUT_LIVE),
 	FIELD(outgoing, server,            FT_STRING, MUT_LIVE),
 	FIELD(outgoing, stream_mode,       FT_STRING, MUT_RESTART),
@@ -755,6 +764,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.qpDelta", "video0.qp_delta" },
 	{ "video0.minQp", "video0.min_qp" },
 	{ "video0.maxQp", "video0.max_qp" },
+	{ "video0.maxFramePct", "video0.max_frame_pct" },
 	{ "outgoing.maxPayloadSize", "outgoing.max_payload_size" },
 	{ "outgoing.audioPort", "outgoing.audio_port" },
 	{ "fpv.roiEnabled", "fpv.roi_enabled" },
@@ -999,6 +1009,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			 * held a 300 kbps target the full rate overran at QP 51
 			 * (bench 2026-10-20). */
 			"video0.fps_divisor",
+			/* Read by cv610_apply_max_frame_pct(), live and at
+			 * startup.  On the OS02K10 at 1080p60 with a rolling-bar
+			 * test pattern, 150 took the P-frame p99 from 115 to 57
+			 * kB and the air->ground p99 from 72 to 48 ms (bench
+			 * 2026-10-22). */
+			"video0.max_frame_pct",
 			/* Read by cv610_apply_roi_qp(), live and at cold boot.
 			 * Listed only because the delta reaches the encoder and
 			 * moves the picture ON THIS PART -- a measurement on a
@@ -1082,6 +1098,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * decimate through video0.fps itself, which is live there. */
 	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
+		return 0;
+
+	/* video0.max_frame_pct is the CV610 encoder's super-frame re-encode.
+	 * The SigmaStar parts have nothing wired to it. */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.max_frame_pct") == 0)
 		return 0;
 
 	/* These controls have no Maruko implementation.  Keep them in the shared
@@ -1482,6 +1504,12 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 		if (cfg->video0.intra_refresh_qp > 51)
 			return "video0.intra_refresh_qp must be 0..51";
 	}
+	if (strcmp(key, "video0.max_frame_pct") == 0) {
+		if (cfg->video0.max_frame_pct != 0 &&
+		    (cfg->video0.max_frame_pct < VENC_MAX_FRAME_PCT_MIN ||
+		     cfg->video0.max_frame_pct > VENC_MAX_FRAME_PCT_MAX))
+			return "video0.max_frame_pct must be 0 or 100..1000";
+	}
 	if (strcmp(key, "video0.fps_divisor") == 0) {
 		if (cfg->video0.fps_divisor < 1 ||
 		    cfg->video0.fps_divisor > VENC_FPS_DIVISOR_MAX)
@@ -1546,6 +1574,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.qp_delta",
 		"video0.min_qp",
 		"video0.max_qp",
+		"video0.max_frame_pct",
 		"video0.intra_refresh_qp",
 		"video0.size",
 		"video0.scene_holdoff",
@@ -1729,6 +1758,7 @@ typedef enum {
 	LIVE_GROUP_DETECT,
 	LIVE_GROUP_QR_WINDOW,
 	LIVE_GROUP_FPS_DIVISOR,
+	LIVE_GROUP_MAX_FRAME,
 	LIVE_GROUP_COUNT
 } LiveApplyGroup;
 
@@ -1925,6 +1955,8 @@ static LiveApplyGroup live_group_for_key(const char *canonical_key)
 		return LIVE_GROUP_QR_WINDOW;
 	if (strcmp(canonical_key, "video0.fps_divisor") == 0)
 		return LIVE_GROUP_FPS_DIVISOR;
+	if (strcmp(canonical_key, "video0.max_frame_pct") == 0)
+		return LIVE_GROUP_MAX_FRAME;
 
 	return LIVE_GROUP_INVALID;
 }
@@ -1974,6 +2006,8 @@ static const char *live_group_name(LiveApplyGroup group)
 		return "qr.windowMs";
 	case LIVE_GROUP_FPS_DIVISOR:
 		return "video0.fpsDivisor";
+	case LIVE_GROUP_MAX_FRAME:
+		return "video0.maxFramePct";
 	default:
 		return "unknown";
 	}
@@ -2157,6 +2191,8 @@ static int live_group_supported_for_cfg(const VencConfig *cfg,
 		return 1;
 	case LIVE_GROUP_FPS_DIVISOR:
 		return g_cb->apply_fps_divisor != NULL;
+	case LIVE_GROUP_MAX_FRAME:
+		return g_cb->apply_max_frame_pct != NULL;
 	default:
 		return 0;
 	}
@@ -2266,6 +2302,9 @@ static void copy_live_group_fields(VencConfig *dst, const VencConfig *src,
 		break;
 	case LIVE_GROUP_FPS_DIVISOR:
 		dst->video0.fps_divisor = src->video0.fps_divisor;
+		break;
+	case LIVE_GROUP_MAX_FRAME:
+		dst->video0.max_frame_pct = src->video0.max_frame_pct;
 		break;
 	default:
 		break;
@@ -2415,6 +2454,8 @@ static int apply_live_group_for_cfg(const VencConfig *cfg,
 		return 0;
 	case LIVE_GROUP_FPS_DIVISOR:
 		return g_cb->apply_fps_divisor(cfg->video0.fps_divisor);
+	case LIVE_GROUP_MAX_FRAME:
+		return g_cb->apply_max_frame_pct(cfg->video0.max_frame_pct);
 	default:
 		return -2;
 	}

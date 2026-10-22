@@ -53,6 +53,8 @@ typedef struct {
 	int apply_detect_reload_calls;
 	int apply_fps_divisor_calls;
 	uint32_t last_fps_divisor;
+	int apply_max_frame_pct_calls;
+	uint32_t last_max_frame_pct;
 
 	uint32_t last_bitrate;
 	uint32_t last_fps;
@@ -284,6 +286,13 @@ static int test_apply_fps_divisor(uint32_t divisor)
 {
 	g_api_cb_state.apply_fps_divisor_calls++;
 	g_api_cb_state.last_fps_divisor = divisor;
+	return 0;
+}
+
+static int test_apply_max_frame_pct(uint32_t pct)
+{
+	g_api_cb_state.apply_max_frame_pct_calls++;
+	g_api_cb_state.last_max_frame_pct = pct;
 	return 0;
 }
 
@@ -1603,6 +1612,116 @@ static int test_cv610_fps_divisor_live_volatile(void)
 	return failures;
 }
 
+/* video0.max_frame_pct: live on CV610 only, 0 or 100..1000, and persisted
+ * like the QP bounds beside it. */
+static int test_cv610_max_frame_pct_live(void)
+{
+	int failures = 0;
+	VencConfig cfg;
+	VencApplyCallbacks cb;
+	int status = 0;
+	char response[1024];
+	const char *path = "/tmp/test_venc_api_max_frame_pct.json";
+	FILE *f;
+	char saved[16384];
+	size_t n;
+
+	CHECK("max frame pct supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.max_frame_pct") == 1);
+	CHECK("max frame pct alias supported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.maxFramePct") == 1);
+	CHECK("max frame pct unsupported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.max_frame_pct") == 0);
+	CHECK("max frame pct unsupported maruko",
+		venc_api_field_supported_for_backend("maruko",
+			"video0.max_frame_pct") == 0);
+
+	venc_config_defaults(&cfg);
+	CHECK("max frame pct boots off", cfg.video0.max_frame_pct == 0);
+	reset_api_cb_state();
+	memset(&cb, 0, sizeof(cb));
+	cb.apply_bitrate = test_apply_bitrate;
+	cb.apply_max_frame_pct = test_apply_max_frame_pct;
+	unlink(path);
+	venc_api_set_config_path(path);
+
+	CHECK("live max frame pct rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.maxFramePct=150", &status, response,
+			sizeof(response)) == 0);
+	CHECK("live max frame pct 200", status == 200);
+	CHECK("live max frame pct applied",
+		g_api_cb_state.apply_max_frame_pct_calls == 1 &&
+		g_api_cb_state.last_max_frame_pct == 150);
+	CHECK("live max frame pct committed", cfg.video0.max_frame_pct == 150);
+
+	CHECK("max frame pct 99 rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.maxFramePct=99", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max frame pct 99 rejected", status == 409);
+	CHECK("max frame pct 1001 rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.maxFramePct=1001", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max frame pct 1001 rejected", status == 409);
+	CHECK("max frame pct rejects never applied",
+		g_api_cb_state.apply_max_frame_pct_calls == 1 &&
+		cfg.video0.max_frame_pct == 150);
+
+	/* Sent with the bitrate in one request, both reach the backend. */
+	CHECK("max frame pct with bitrate rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.bitrate=8000&video0.maxFramePct=200", &status,
+			response, sizeof(response)) == 0);
+	CHECK("max frame pct with bitrate 200", status == 200);
+	CHECK("max frame pct with bitrate applied",
+		g_api_cb_state.last_max_frame_pct == 200 &&
+		g_api_cb_state.last_bitrate == 8000);
+
+	/* A persisting /set saves it. */
+	CHECK("set max frame pct rc",
+		apply_set_query_http(&cfg, "cv610", &cb, "video0.maxFramePct=125",
+			&status, response, sizeof(response)) == 0);
+	CHECK("set max frame pct 200", status == 200);
+	CHECK("set max frame pct applied",
+		g_api_cb_state.last_max_frame_pct == 125);
+	f = fopen(path, "r");
+	n = f ? fread(saved, 1, sizeof(saved) - 1, f) : 0;
+	if (f)
+		fclose(f);
+	saved[n] = '\0';
+	CHECK("set max frame pct persisted",
+		strstr(saved, "\"maxFramePct\": 125,") != NULL);
+
+	CHECK("max frame pct off rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.maxFramePct=0", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max frame pct off 200", status == 200);
+	CHECK("max frame pct off applied",
+		g_api_cb_state.last_max_frame_pct == 0 &&
+		cfg.video0.max_frame_pct == 0);
+
+	/* Without the callback the write must fail. */
+	reset_api_cb_state();
+	cb.apply_max_frame_pct = NULL;
+	CHECK("max frame pct w/o callback rc",
+		apply_query_http_path(&cfg, "cv610", &cb, "/api/v1/live/set",
+			"video0.maxFramePct=150", &status, response,
+			sizeof(response)) == 0);
+	CHECK("max frame pct w/o callback rejected", status != 200);
+	CHECK("max frame pct w/o callback unchanged",
+		cfg.video0.max_frame_pct == 0);
+
+	unlink(path);
+	venc_api_set_config_path(NULL);
+	return failures;
+}
+
 static int test_restart_set_rejects_legacy_codec_field(void)
 {
 	int failures = 0;
@@ -2868,6 +2987,7 @@ int test_venc_api(void)
 	failures += test_live_set_isp_bin_no_callback_returns_501();
 	failures += test_live_set_endpoint_volatile_no_disk_write();
 	failures += test_cv610_fps_divisor_live_volatile();
+	failures += test_cv610_max_frame_pct_live();
 	failures += test_restart_set_rejects_legacy_codec_field();
 	failures += test_single_set_url_decodes_outgoing_server();
 	failures += test_live_apply_sees_already_committed_config();

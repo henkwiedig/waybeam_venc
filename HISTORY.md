@@ -1,5 +1,41 @@
 # History
 
+## [0.86.0] - 2026-10-22
+
+CV610: **`video0.maxFramePct`**, a P-frame size cap. A P-frame bigger than
+that percent of the average frame (bitrate / encoded fps) is encoded again at
+a higher QP, so a scene change costs a blurrier frame instead of one that
+reaches the ground late. `0` = off, else `100..1000`, live and persisted;
+the shipped CV610 default is `150`.
+
+- **Why.** The AR8030 link carries a frame in time proportional to its size,
+  so the 3-4x frames a scene change emits in a row arrived 30-40 ms after the
+  rest (frame size vs capture -> ground latency r = 0.82) and missed the
+  ground's display deadline: a visible frame jump.
+- **How.** The rate controller's super-frame strategy
+  (`ss_mpi_venc_set_super_frame_strategy`, re-encode, frame bits first). The
+  threshold follows every live bitrate and `fpsDivisor` change; every
+  `set_chn_attr` also resets the strategy, so it is written again after each.
+  I-frames are never capped.
+- **Above 60 encoded fps the frame is dropped instead**, and the next one
+  encoded at QP + 4 (at most one in a row). At 1080p100 the encoder has no
+  time for a second pass: every re-encode left it a frame behind, and the
+  backlog drain then skipped 252 frames a minute.
+- **Measured** on the OS02K10 over the AR8030 link, rolling-bar test pattern
+  (16 lines a frame), 60 s each:
+
+  | 1080p60 | P-frame p99 | capture -> ground p99 | frames late at the display |
+  |---|---|---|---|
+  | off | 115 kB | 72.7 ms | 1.77/s |
+  | 200 | 58 kB | 51.9 ms | 0.67/s |
+  | 150 | 57 kB | 47.6 ms | 0.17/s |
+  | 125 | 51 kB | 46.3 ms | 0.05/s |
+
+  2-4% of the frames re-encoded, none lost, no encoder backlog. 1080p100 at
+  150: 68.9 -> 48.6 ms p99, 1.6 frames dropped a second, no backlog.
+
+HTTP contract 0.33.0 (additive).
+
 ## [0.85.0] - 2026-10-20
 
 CV610: **`video0.fpsDivisor`**, live frame decimation, and a `video0.bitrate`
