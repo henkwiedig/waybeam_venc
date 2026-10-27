@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -204,8 +205,15 @@ static void init_stream_buffer(struct v4l2_buffer *buf,
 	buf->length = 1;
 }
 
+/* The bitstream buffers are vb2 dma-contig MMAP memory, which the CPU sees
+ * uncached.  Parsing an access unit in place -- the Annex-B scan reads it a
+ * byte at a time -- took the loop ~10 ms per 1080p60 frame (66 % of a core
+ * on the P1) and starved the encoder: capture to frame-shm 29 ms median,
+ * 52 ms p99.  One bulk copy into cached memory instead: 10 / 12 ms.  wave5
+ * offers no cached mapping (no V4L2_MEMORY_FLAG_NON_COHERENT). */
 static int map_stream_buffers(Ar9311Encoder *enc)
 {
+	uint32_t copy_len = 0;
 	int i;
 
 	if (request_buffers(enc->fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
@@ -230,8 +238,16 @@ static int map_stream_buffers(Ar9311Encoder *enc)
 		}
 		enc->stream_map[i] = map;
 		enc->stream_len[i] = plane.length;
+		if (plane.length > copy_len)
+			copy_len = plane.length;
 		if (ar9311_encoder_release_stream(enc, i) != 0)
 			return -1;
+	}
+	enc->stream_copy = malloc(copy_len);
+	if (!enc->stream_copy) {
+		fprintf(stderr, "ERROR: [ar9311] no memory for a %u-byte "
+			"bitstream copy\n", copy_len);
+		return -1;
 	}
 	return 0;
 }
@@ -405,11 +421,13 @@ int ar9311_encoder_dequeue_stream(Ar9311Encoder *enc, int *slot,
 		return -1;
 	}
 	*slot = (int)buf.index;
-	*data = (const uint8_t *)enc->stream_map[buf.index] + plane.data_offset;
 	*len = plane.bytesused > plane.data_offset
 		? plane.bytesused - plane.data_offset : 0;
 	if (buf.flags & V4L2_BUF_FLAG_ERROR)
 		*len = 0;
+	memcpy(enc->stream_copy, (const uint8_t *)enc->stream_map[buf.index] +
+		plane.data_offset, *len);
+	*data = enc->stream_copy;
 	*timestamp_us = (uint64_t)buf.timestamp.tv_sec * 1000000u +
 		(uint64_t)buf.timestamp.tv_usec;
 	return 0;
@@ -460,6 +478,8 @@ void ar9311_encoder_close(Ar9311Encoder *enc)
 			munmap(enc->stream_map[i], enc->stream_len[i]);
 		enc->stream_map[i] = NULL;
 	}
+	free(enc->stream_copy);
+	enc->stream_copy = NULL;
 	if (enc->fd >= 0)
 		close(enc->fd);
 	enc->fd = -1;

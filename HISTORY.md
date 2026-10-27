@@ -1,5 +1,17 @@
 # History
 
+## [0.92.1] - 2026-10-27
+
+AR9311: **~19 ms less latency.**  The wave5 bitstream buffers are uncached
+to the CPU, and the backend parsed each access unit in place, a byte at a
+time for the Annex-B scan: ~10 ms of CPU per 1080p60 frame (66 % of a core
+on the P1's two), during which the one loop fed the encoder nothing.  Each
+access unit is now copied out once and parsed from the copy.  Measured on a
+P1 at ~22 Mbit/s: waybeam's CPU 66 % -> 4 %, camera hand-back to frame-shm
+29.0 / 35.6 / 52.2 ms -> 10.2 / 11.9 / 12.4 ms (median / p90 / p99), no
+camera skips.  Docs: the CVISP `depth` (`docs/AR9311_BACKEND.md`) -- 2 is the
+lowest that is not torn, the driver's default 3 costs a frame.
+
 ## [0.92.0] - 2026-10-01
 
 AR9311: **picture controls and orientation.**  `contract_version` moves to

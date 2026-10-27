@@ -21,6 +21,12 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   under it, so at most four frames are out with the encoder -- enough for it
   to fall behind during a keyframe and catch up; a frame beyond that is
   requeued unencoded (`cameraSkips` in `/api/v1/transport/status`).
+  The block writes a buffer during the frame *after* the tick that armed
+  it, so depth 2 hands it back about 1 ms after its last row; the driver's
+  default 3 adds a whole frame (16.7 ms at 60 fps) and 1 hands it back
+  before it is written (torn frames).  The OpenIPC builder sets 2.  The
+  buffer timestamp is the hand-back time, so this delay never shows in a
+  capture-to-display figure built on it.
 - **Encode** (`src/ar9311_encoder.c`): the wave5 mem2mem encoder imports the
   camera planes at their own strides (zero copy) and returns one Annex-B
   access unit per bitstream buffer. H.265 Main, level 4.1, CBR with
@@ -36,6 +42,10 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
 - **Output** (`src/ar9311_runtime.c`): the shared HEVC RTP packetizer over
   `udp://` / `unix://`, or the `frame-shm://` whole-frame ring (the transport
   `ar8030-transport-tx` consumes on OpenIPC's AR8030 targets).
+- The bitstream buffers are uncached to the CPU; each access unit is copied
+  out once before it is parsed or sent.  Read in place (the Annex-B scan
+  goes a byte at a time) it cost the loop ~10 ms per 1080p60 frame and
+  starved the encoder.
 - One thread: `poll()` over the camera and the encoder, then drain finished
   access units, return source buffers to the camera, feed new frames.
 

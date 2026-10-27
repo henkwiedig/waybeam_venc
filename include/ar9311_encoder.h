@@ -45,6 +45,7 @@ typedef struct {
 	int src_count;
 	void *stream_map[AR9311_ENCODER_STREAM_BUFS];
 	uint32_t stream_len[AR9311_ENCODER_STREAM_BUFS];
+	uint8_t *stream_copy;  /* cached copy of the last access unit taken */
 	int streaming;
 } Ar9311Encoder;
 
@@ -68,8 +69,8 @@ int ar9311_encoder_queue_source(Ar9311Encoder *enc, int index, const int *fds,
 int ar9311_encoder_reclaim_source(Ar9311Encoder *enc, int *index);
 
 /** Take a finished access unit.  Returns 0 with *slot, *data, *len and
- *  *timestamp_us (the source frame's) set -- Annex-B, valid until
- *  ar9311_encoder_release_stream, 0 bytes for a frame the driver flagged
+ *  *timestamp_us (the source frame's) set -- Annex-B in a cached copy,
+ *  valid until the next call, 0 bytes for a frame the driver flagged
  *  failed -- 1 when none is ready, -1 on error. */
 int ar9311_encoder_dequeue_stream(Ar9311Encoder *enc, int *slot,
 	const uint8_t **data, size_t *len, uint64_t *timestamp_us);
