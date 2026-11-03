@@ -1,5 +1,42 @@
 # History
 
+## [0.87.0] - 2026-11-03
+
+CV610: early slice output (`video0.sliceOutput`). The radio starts on a
+picture while the encoder is still on the rest of it.
+
+- **Each slice leaves the encoder as soon as its rows are encoded**
+  (`slice_output_en` on the slice split, `by_frame=n` channel), and goes onto
+  the frame-SHM ring as an entry of its own. New ring flag
+  `VENC_FRAME_FLAG_PARTIAL` (0x10): more of this access unit follows. The last
+  slice is published without it, and every slice of an access unit carries the
+  same pts and flags. Needs `sliceCount` 2 or more; off by default.
+- **One access unit, one set of bookkeeping.** With more than one slice the
+  drain loop now assembles the access unit over its fetches and does the
+  per-picture work once: IDR detection, `gdr_pos`, `frames_since_idr`, the
+  sidecar message (with the whole picture's size), frame/byte counters, the
+  rate watch, the recorder and the RTP path. An access unit ends on the fetch
+  the driver marks `is_frame_end`, or at the next picture's first slice
+  (`first_slice_segment_in_pic_flag`) if that mark is ever missing. Before,
+  `sliceCount` > 1 on the OS02K10 published every slice as an access unit of
+  its own.
+- **`maxFramePct` is off with slice output**: a slice already on the link
+  cannot be encoded again. A live write is rejected.
+- **Slice mode ring**: 16 slots of 256 KiB instead of 8 of 512 KiB.
+- **Measured** on the Ascent Lite (OS02K10 1080p60) over the AR8030 link to the
+  VRX Pro (ar8030-transport-tx/rx `slice-stream`), 60-90 s per run:
+
+  | | 1 slice | 3 slices, early output |
+  |---|---|---|
+  | 16 Mbit/s fixed: capture -> ground, avg / max | 34.3 / 42-47 ms | 27.9 / 36-42 ms |
+  | link rate controller (~22 Mbit/s): capture -> ground, avg / max | 38.3 / 53.0 ms | 30.2 / 43.8 ms |
+  | ... ground vsync-lock target | 57.0 ms | 47.3 ms |
+
+  Capture -> first byte on the link 12.1 -> 5.8 ms. 2 and 4 slices gain about
+  as much as 3 (28.4 ms); 6 is worse (30.7 ms, stalls), as every slice costs
+  the transmitter one more `bb_socket_write()`, about 1 ms. 3 slices without
+  early output: 34.3 ms, no change.
+
 ## [0.86.1] - 2026-11-03
 
 CV610: two dropped frames fixed, one at every intra-refresh cycle start and one

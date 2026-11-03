@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.33.0`
+- `contract_version`: `0.34.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -34,6 +34,7 @@
 | `video0.intraRefreshQp` | **false** | **false** | true |
 | `video0.fpsDivisor` | **false** (live `video0.fps` decimates) | **false** (same) | true (**from 0.85.0**) |
 | `video0.maxFramePct` | **false** | **false** | true (**from 0.86.0**) |
+| `video0.sliceOutput` | **false** | **false** | true (**from 0.87.0**) |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
 | `image.mirror` / `image.flip` | true | true | true (**from 0.75.0**) |
 | `image.rotate` | true | true | **false** |
@@ -110,8 +111,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.86.1",
-    "contract_version": "0.33.0",
+    "app_version": "0.87.0",
+    "contract_version": "0.34.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -231,7 +232,8 @@ per picture; 1 disables splitting. Star6E, Maruko and CV610 advertise the
 field. The request is mapped to backend row geometry, so delivered counts may
 quantize or saturate; startup performs vendor Set/Get verification and fails
 an explicit multi-slice request when the backend cannot apply it. Slice NALs
-remain one whole access unit for RTP, recording and frame-SHM.
+remain one whole access unit for RTP and recording, and for frame-SHM unless
+`video0.sliceOutput` (CV610) publishes each slice as it is encoded.
 
 `data.routes` (added 0.18.4) reports which optional routes the running
 backend actually services, so a client does not have to call an expensive
@@ -739,6 +741,17 @@ curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
 - **Why.** The link carries a frame in time proportional to its size, so a scene change that emits several 3-4x frames in a row delivers them 30-40 ms late, past the ground's display deadline. A capped frame is blurrier instead of late.
 - **Measured** on the OS02K10 over the AR8030 link, rolling-bar test pattern, 60 s each. 1080p60 (re-encode): off -> 200 / 150 / 125: P-frame p99 115 -> 58 / 57 / 51 kB, capture -> ground p99 72.7 -> 51.9 / 47.6 / 46.3 ms, frames late at the display 1.77 -> 0.67 / 0.17 / 0.05 a second, 2-4% of the frames re-encoded, none lost. 1080p100 at 150 (drop): p99 68.9 -> 48.6 ms, 1.6 frames dropped a second, no encoder backlog.
 - The threshold follows every live bitrate and `video0.fpsDivisor` change. I-frames are never capped.
+- `supported:false` on Star6E and Maruko.
+
+### `video0.sliceOutput` (CV610) — Early Slice Output
+
+`video0.sliceOutput` (canonical `video0.slice_output`, bool, default `false`, restart-required, persisted) hands each slice out of the encoder the moment its rows are encoded (`slice_output_en` on the slice split) and publishes it on the frame-SHM ring as an entry of its own, flagged `VENC_FRAME_FLAG_PARTIAL` (0x10) unless it is the access unit's last slice (`include/venc_frame_ring.h`). The link can then send a picture while the encoder is still on the rest of it.
+
+- Needs `video0.sliceCount` 2 or more and a `by_frame=n` channel (the OS02K10 build); otherwise it logs a warning and stays off.
+- Turns `video0.maxFramePct` off, at startup and against live writes (rejected): the slices of a picture are on the link before the encoder knows the picture is too big, so the super-frame re-encode cannot run.
+- Only a frame-SHM consumer that handles slice entries may read such a ring (ar8030-transport-tx from its `slice-stream` change on); any other would take every slice for a picture. RTP output and the recorder still get whole access units.
+- In slice mode the ring has 16 slots of 256 KiB instead of 8 of 512 KiB (the same 4 MiB).
+- **Measured** on the Ascent Lite (OS02K10 1080p60) over the AR8030 link to the VRX Pro, 60-90 s per run: at a fixed 16 Mbit/s, capture -> reassembled on the ground 34.3 -> 27.9 ms average with 3 slices (2: 28.4, 4: 28.4, 6: 30.7 with stalls — every slice is one more `bb_socket_write()`, about 1 ms each); with the link's own rate controller at ~22 Mbit/s 38.3 -> 30.2 ms average, 53.0 -> 43.8 ms max, and the ground's vsync-lock target 57.0 -> 47.3 ms with the same drop rate. Three slices without early output changed nothing (34.3 ms).
 - `supported:false` on Star6E and Maruko.
 
 ### `GET /api/v1/restart`
@@ -2017,6 +2030,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.34.0` (additive — early slice output on CV610): adds `video0.sliceOutput` (`video0.slice_output`), bool, default `false`, restart-required, persisted. Each slice goes onto frame-SHM as it is encoded, flagged `VENC_FRAME_FLAG_PARTIAL` until the access unit's last; `video0.maxFramePct` is off meanwhile. `supported:false` on Star6E and Maruko. See "`video0.sliceOutput` (CV610) — Early Slice Output".
 - `0.33.0` (additive — P-frame size cap on CV610): adds `video0.maxFramePct` (`video0.max_frame_pct`), uint `0` (off) or `100..1000`, live, persisted. CV610 re-encodes a P-frame above that percent of the average frame, or drops it above 60 encoded fps; `supported:false` on Star6E and Maruko. See "`video0.maxFramePct` (CV610) — P-Frame Size Cap".
 - `0.32.0` (additive — live frame decimation on CV610): adds `video0.fpsDivisor` (`video0.fps_divisor`), uint `1..4`, live, runtime-only (never persisted, not in `/api/v1/config`). CV610 encodes every Nth sensor frame and divides the `video0.bitrate` floor by N; `supported:false` on Star6E and Maruko. `/api/v1/fps/live` reports the decimated rate. See "`video0.fpsDivisor` (CV610) — Live Frame Decimation".
 - `0.29.0` (additive — CV610 gains PQTools `.bin` import and export):

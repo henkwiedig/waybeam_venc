@@ -57,6 +57,7 @@ int cv610_encoder_config_derive(const VencConfig *cfg, uint32_t width,
 		out->slice.enabled = 1;
 		out->slice.split_size = per;
 		out->slice.expected_count = (rows + per - 1u) / per;
+		out->slice.output_en = cfg->video0.slice_output ? 1u : 0u;
 	}
 
 	return 0;

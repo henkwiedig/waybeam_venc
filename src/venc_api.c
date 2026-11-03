@@ -507,6 +507,16 @@ static const FieldUi ui_intra_refresh_qp = {
 	"of growing it. Restart-only; needs resilience != off."
 };
 
+static const FieldUi ui_slice_output = {
+	"Video", "Early slice output", "toggle", 0, 0, 0, NULL,
+	"CV610: each slice leaves the encoder, and goes out on frame-SHM, as "
+	"soon as its rows are encoded, so the link starts sending a picture "
+	"while the rest of it is still being encoded. Needs sliceCount 2 or "
+	"more and a frame-SHM consumer that handles slice entries "
+	"(ar8030-transport-tx). Turns maxFramePct off: a slice already sent "
+	"cannot be encoded again. Restart-only."
+};
+
 static const FieldUi ui_slice_count = {
 	"Video", "Slices per frame", "number", 1, VENC_SLICE_COUNT_MAX, 1, NULL,
 	"Independent H.265 slices per picture. 1 = off. Multi-slice "
@@ -659,6 +669,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_threshold,  FT_UINT16, MUT_RESTART),
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
+	FIELD_UI(video0, slice_output, FT_BOOL,   MUT_RESTART, &ui_slice_output),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
@@ -790,6 +801,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneThreshold", "video0.scene_threshold" },
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.sliceCount", "video0.slice_count" },
+	{ "video0.sliceOutput", "video0.slice_output" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -990,6 +1002,10 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"video0.fps", "video0.size",
 			"video0.bitrate", "video0.gop_size",
 			"video0.slice_count", "video0.resilience",
+			/* Read at encoder setup (cv610_prepare/venc_start):
+			 * slice_output_en on the slice split, one frame-SHM
+			 * entry per slice. */
+			"video0.slice_output",
 			/* video0.qp_delta is deliberately ABSENT.  CV610's CBR rate
 			 * controller stores gop_attr.normal_p.ip_qp_delta and ignores
 			 * it (measured; README), and the register that does move
@@ -1098,6 +1114,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * decimate through video0.fps itself, which is live there. */
 	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
+		return 0;
+
+	/* video0.slice_output is the CV610 encoder's early slice output.  The
+	 * SigmaStar backends publish whole access units only. */
+	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
+	    strcmp(canonical_key, "video0.slice_output") == 0)
 		return 0;
 
 	/* video0.max_frame_pct is the CV610 encoder's super-frame re-encode.

@@ -154,6 +154,10 @@ typedef struct {
 	                            * >1 enables spatial loss concealment on the
 	                            * link RX (waybeam-link PROTOCOL.md §6.3b).
 	                            * Star6E, Maruko and CV610. */
+	bool slice_output;         /* CV610: each slice leaves the encoder (and
+	                            * goes on frame-SHM) as soon as it is encoded,
+	                            * not with the whole picture.  Needs
+	                            * slice_count > 1; turns max_frame_pct off. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

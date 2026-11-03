@@ -61,8 +61,16 @@
 #define SNS_VENC_CHN 0
 #endif
 #define CV610_VENC_CHN SNS_VENC_CHN
+/* by_frame default, see cv610_venc_start(). */
+#ifndef SNS_VENC_BY_FRAME
+#define SNS_VENC_BY_FRAME 1
+#endif
 #define CV610_FRAME_RING_SLOTS 8
 #define CV610_FRAME_RING_BYTES (512u * 1024u)
+/* With early slice output every slice is a ring entry: more, smaller slots,
+ * the same 4 MiB. */
+#define CV610_SLICE_RING_SLOTS 16
+#define CV610_SLICE_RING_BYTES (256u * 1024u)
 /* Room for one access unit's VPS + SPS + PPS + SEI (~120 bytes measured). */
 #define CV610_AU_PREFIX_MAX 4096u
 
@@ -276,6 +284,24 @@ typedef struct {
 	 * cv610_au_prefix_merge(). */
 	uint8_t au_prefix[CV610_AU_PREFIX_MAX];
 	size_t au_prefix_len;
+	/* More than one slice: an access unit arrives over several fetches and
+	 * is assembled in `au` (cv610_run).  Set with the slice split. */
+	int au_assemble;
+	/* video0.slice_output in force (cv610_prepare): each slice goes onto
+	 * the frame-SHM ring as it is fetched, see cv610_publish_slice(). */
+	int slice_output;
+	int au_end_unmarked_warned;
+	struct {
+		int open;
+		int is_idr;
+		int ring_failed;     /* a slice did not fit: the rest is withheld */
+		uint32_t qp;         /* start_qp of its latest fetch */
+		uint64_t capture_us;
+		VencFrameMeta meta;  /* the frame-SHM metadata of every slice */
+		uint8_t *buf;        /* the whole access unit */
+		size_t len;
+		size_t cap;
+	} au;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -683,6 +709,11 @@ static int cv610_apply_max_frame_pct(uint32_t pct)
 
 	if (!ctx)
 		return -1;
+	if (pct && ctx->slice_output) {
+		fprintf(stderr, "WARNING: maxFramePct stays off with early slice "
+			"output (video0.sliceOutput)\n");
+		return -1;
+	}
 	prev = __atomic_exchange_n(&ctx->max_frame_pct, pct, __ATOMIC_RELAXED);
 	if (cv610_write_max_frame(ctx, 1) != 0) {
 		__atomic_store_n(&ctx->max_frame_pct, prev, __ATOMIC_RELAXED);
@@ -2340,9 +2371,10 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 	}
 	ref_status.apply_ok = 1;
 
-	/* split_mode=1 is the live firmware's row-split default. Early slice
-	 * output remains off: this runtime publishes one whole access unit per
-	 * GetStream result to both frame-SHM and RTP. */
+	/* split_mode=1 is the live firmware's row-split default.  With
+	 * slice_output_en each slice is handed out the moment its rows are
+	 * encoded (video0.slice_output, decided in cv610_prepare); without it
+	 * they come out together once the picture is done. */
 	memset(&split, 0, sizeof(split));
 	ret = ss_mpi_venc_get_slice_split(CV610_VENC_CHN, &split);
 	if (ret != TD_SUCCESS) {
@@ -2351,7 +2383,8 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 		goto fail;
 	}
 	split.enable = enc->slice.enabled ? TD_TRUE : TD_FALSE;
-	split.slice_output_en = TD_FALSE;
+	split.slice_output_en = enc->slice.output_en && ctx->slice_output
+		? TD_TRUE : TD_FALSE;
 	if (enc->slice.enabled) {
 		split.split_mode = enc->slice.split_mode;
 		split.split_size = enc->slice.split_size;
@@ -2367,14 +2400,15 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 	memset(&split_rb, 0, sizeof(split_rb));
 	ret = ss_mpi_venc_get_slice_split(CV610_VENC_CHN, &split_rb);
 	if (ret != TD_SUCCESS || split_rb.enable != split.enable ||
-	    split_rb.slice_output_en != TD_FALSE ||
+	    split_rb.slice_output_en != split.slice_output_en ||
 	    (enc->slice.enabled &&
 	     (split_rb.split_mode != split.split_mode ||
 	      split_rb.split_size != split.split_size))) {
 		fprintf(stderr, "ERROR: CV610 slice readback mismatch "
-			"ret=0x%x want=%u/%u/%u/0 got=%u/%u/%u/%u\n",
+			"ret=0x%x want=%u/%u/%u/%u got=%u/%u/%u/%u\n",
 			(unsigned)ret, (unsigned)split.enable,
 			(unsigned)split.split_mode, (unsigned)split.split_size,
+			(unsigned)split.slice_output_en,
 			(unsigned)split_rb.enable, (unsigned)split_rb.split_mode,
 			(unsigned)split_rb.split_size,
 			(unsigned)split_rb.slice_output_en);
@@ -2385,6 +2419,7 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 			split_rb.split_size - 1u) / split_rb.split_size;
 	ctx->delivered_slice_count = delivered_slices > 255u
 		? 255u : (uint8_t)delivered_slices;
+	ctx->au_assemble = enc->slice.enabled ? 1 : 0;
 
 	cv610_publish_encoder_status(&intra_status, &ref_status);
 	fprintf(stderr, "[waybeam] CV610 resilience: intra=%s rows=%u qp=%u "
@@ -2394,9 +2429,10 @@ static int cv610_apply_encoder_config(Cv610RunnerContext *ctx,
 		(unsigned)ref_status.base, (unsigned)ref_status.enhance,
 		(unsigned)ref_status.pred);
 	fprintf(stderr, "[waybeam] CV610 slices: requested=%u delivered=%u "
-		"mode=%u lcu_rows_per_slice=%u early_output=0\n",
+		"mode=%u lcu_rows_per_slice=%u early_output=%u\n",
 		(unsigned)enc->slice.requested_count, (unsigned)delivered_slices,
-		(unsigned)split_rb.split_mode, (unsigned)split_rb.split_size);
+		(unsigned)split_rb.split_mode, (unsigned)split_rb.split_size,
+		(unsigned)split_rb.slice_output_en);
 	return 0;
 
 fail:
@@ -2442,10 +2478,7 @@ static int cv610_venc_start(Cv610RunnerContext *ctx)
 	 * hardware genuinely completing frames underneath it (VEDU_0 interrupt
 	 * count climbing). Set by the Makefile's CV610_SENSOR_PLUGIN as
 	 * -DSNS_VENC_BY_FRAME; this fallback only fires if compiled outside
-	 * that Makefile path. */
-#ifndef SNS_VENC_BY_FRAME
-#define SNS_VENC_BY_FRAME 1
-#endif
+	 * that Makefile path (default at the top of this file). */
 	attr.venc_attr.is_by_frame = SNS_VENC_BY_FRAME ? TD_TRUE : TD_FALSE;
 	attr.venc_attr.pic_width = ctx->pipeline.out_width;
 	attr.venc_attr.pic_height = ctx->pipeline.out_height;
@@ -2660,7 +2693,10 @@ static int cv610_output_start(Cv610RunnerContext *ctx)
 
 	if (ctx->output_uri.type == VENC_OUTPUT_URI_FRAME_SHM) {
 		ctx->frame_ring = venc_frame_ring_create(ctx->output_uri.endpoint,
-			CV610_FRAME_RING_SLOTS, CV610_FRAME_RING_BYTES);
+			ctx->slice_output ? CV610_SLICE_RING_SLOTS
+				: CV610_FRAME_RING_SLOTS,
+			ctx->slice_output ? CV610_SLICE_RING_BYTES
+				: CV610_FRAME_RING_BYTES);
 		return ctx->frame_ring ? 0 : -1;
 	}
 	if (ctx->output_uri.type == VENC_OUTPUT_URI_SHM) {
@@ -2765,6 +2801,22 @@ static int cv610_prepare(void *opaque)
 	ctx->pipeline.fps = mode->fps;
 	ctx->fps_divisor = 1;
 	ctx->max_frame_pct = cfg->video0.max_frame_pct;
+	/* Early slice output needs more than one slice, and a by_frame=n
+	 * channel: one fetched by frame hands out whole pictures whatever the
+	 * split says.  The super-frame re-encode cannot work with it -- the
+	 * slices of a picture are on the link before the encoder knows the
+	 * picture is too big -- so it is off then. */
+	ctx->slice_output = cfg->video0.slice_output &&
+		cfg->video0.slice_count > 1 && !SNS_VENC_BY_FRAME;
+	if (cfg->video0.slice_output && !ctx->slice_output)
+		fprintf(stderr, "WARNING: video0.sliceOutput needs sliceCount 2 "
+			"or more%s; off\n", SNS_VENC_BY_FRAME
+				? " and a by_frame=n channel (OS02K10 build)" : "");
+	if (ctx->slice_output && ctx->max_frame_pct) {
+		printf("> maxFramePct %u%% off: early slice output\n",
+			(unsigned)ctx->max_frame_pct);
+		ctx->max_frame_pct = 0;
+	}
 	ctx->pipeline.lanes = SNS_LANES;
 	ctx->pipeline.data_rate_x2 = SNS_DATA_RATE_X2;
 	ctx->pipeline.bayer = SNS_BAYER;
@@ -2991,6 +3043,396 @@ static void cv610_report_frame_status(Cv610RunnerContext *ctx)
 			(unsigned long long)audio_drops);
 }
 
+/* 1 if the first slice in `frame` starts a picture
+ * (first_slice_segment_in_pic_flag, the first bit after the NAL header), 0 if
+ * it continues one, -1 if `frame` holds no slice. */
+static int cv610_starts_picture(const uint8_t *frame, size_t len)
+{
+	size_t cursor = 0;
+	const uint8_t *nal;
+	size_t nal_len;
+
+	while (h26x_util_annexb_next(frame, len, &cursor, &nal, &nal_len)) {
+		if (h26x_util_hevc_nalu_type(nal, nal_len) <= 31)
+			return nal_len > 2 ? (nal[2] & 0x80) != 0 : -1;
+	}
+	return -1;
+}
+
+static int cv610_au_append(Cv610RunnerContext *ctx, const uint8_t *data,
+	size_t len)
+{
+	if (ctx->au.len + len > ctx->au.cap) {
+		size_t cap = ctx->au.cap ? ctx->au.cap : 64u * 1024u;
+		uint8_t *grown;
+
+		while (cap < ctx->au.len + len)
+			cap *= 2;
+		grown = realloc(ctx->au.buf, cap);
+		if (!grown)
+			return -1;
+		ctx->au.buf = grown;
+		ctx->au.cap = cap;
+	}
+	memcpy(ctx->au.buf + ctx->au.len, data, len);
+	ctx->au.len += len;
+	return 0;
+}
+
+/* The access-unit half of the drain loop, run on its first fetch: everything
+ * that describes the picture rather than one slice of it.  With more than one
+ * slice an access unit arrives over several fetches (by_frame=n hands them out
+ * one NAL at a time, and with video0.slice_output each slice the moment it is
+ * encoded), and none of this may advance per slice -- gdr_pos and
+ * frames_since_idr did exactly that per parameter-set fetch until 0.86.1. */
+static void cv610_au_begin(Cv610RunnerContext *ctx,
+	const ot_venc_stream *stream, const uint8_t *frame, size_t frame_len,
+	int is_enhance)
+{
+	VencFrameMeta *meta = &ctx->au.meta;
+
+	ctx->au.open = 1;
+	ctx->au.ring_failed = 0;
+	ctx->au.len = 0;
+	if (ctx->svct_active && ctx->ref_census_frames < 64u) {
+		unsigned int ref_type = (unsigned int)stream->h265_info.ref_type;
+
+		if (ref_type < OT_VENC_P_SLICE_BUTT)
+			ctx->ref_type_counts[ref_type]++;
+		ctx->ref_census_frames++;
+		if (ctx->ref_census_frames == 64u) {
+			fprintf(stderr, "[waybeam] CV610 ref census: frames=64 "
+				"types=%u,%u,%u,%u,%u,%u trail_n_patched=%u\n",
+				(unsigned)ctx->ref_type_counts[0],
+				(unsigned)ctx->ref_type_counts[1],
+				(unsigned)ctx->ref_type_counts[2],
+				(unsigned)ctx->ref_type_counts[3],
+				(unsigned)ctx->ref_type_counts[4],
+				(unsigned)ctx->ref_type_counts[5],
+				(unsigned)ctx->trail_n_patched);
+		}
+	}
+
+	ctx->au.is_idr = cv610_frame_is_idr(frame, frame_len);
+	/* Outside the sidecar gate on purpose: a counter that only
+	 * advances while a probe is subscribed would report the
+	 * frames since the subscription, not since the IDR. */
+	if (ctx->au.is_idr)
+		ctx->frames_since_idr = 0;
+	else if (ctx->frames_since_idr < UINT16_MAX)
+		ctx->frames_since_idr++;
+	ctx->au.capture_us = stream->pack_cnt
+		? cv610_capture_us_from_pts(ctx, (uint64_t)stream->pack[0].pts)
+		: 0;
+
+	/* One seqlock read per frame, before either transport is
+	 * touched, so every datagram of this access unit uses
+	 * the same destination and one enable state. */
+	cv610_transport_begin_frame(ctx);
+
+	/* GDR bookkeeping tracks the ENCODER's intra-refresh
+	 * phase, so it advances every frame regardless of whether
+	 * the frame is transmitted.  Skipping it while
+	 * outgoing.enabled=false desynced meta.gdr_pos from the
+	 * real wavefront for every frame after a re-enable, until
+	 * the next IDR happened to resync it -- and the link
+	 * consumer assigns slice importance from that position. */
+	memset(meta, 0, sizeof(*meta));
+	/* The ring's pts is a capture time on CLOCK_MONOTONIC, the
+	 * same clock as the sidecar's capture_us and as Star6E's
+	 * ring: a consumer can then compare it with its own clock
+	 * (ar8030-transport maps it onto the ground for per-frame
+	 * latency).  The raw MPP pts sits seconds away from that
+	 * clock on this SoC, so convert it; fall back to the raw
+	 * value only if the MPP timebase could not be read. */
+	if (stream->pack_cnt)
+		meta->pts = ctx->au.capture_us ? (uint32_t)ctx->au.capture_us
+			: (uint32_t)stream->pack[0].pts;
+	meta->codec = VENC_FRAME_CODEC_H265;
+	meta->flags = ctx->au.is_idr ? VENC_FRAME_FLAG_IDR : 0;
+	if (is_enhance)
+		meta->flags |= VENC_FRAME_FLAG_ENHANCE;
+	if (ctx->au.is_idr) {
+		ctx->gdr_counter = 0;
+	} else if (ctx->gdr_active && ctx->gdr_cycle_len > 0) {
+		meta->flags |= VENC_FRAME_FLAG_GDR;
+		meta->gdr_pos = ctx->gdr_counter;
+		meta->gdr_len = ctx->gdr_cycle_len;
+		ctx->gdr_counter++;
+		if (ctx->gdr_counter >= ctx->gdr_cycle_len)
+			ctx->gdr_counter = 0;
+	}
+}
+
+/* video0.slice_output: one slice onto the ring the moment the encoder handed
+ * it out, flagged VENC_FRAME_FLAG_PARTIAL unless it ends the access unit.
+ * After a slice that did not fit, the rest of the access unit is withheld: the
+ * consumer sees the next access unit's pts and gives this one up, rather than
+ * carrying a picture with a hole in it. */
+static void cv610_publish_slice(Cv610RunnerContext *ctx, const uint8_t *data,
+	size_t len, int last)
+{
+	VencFrameMeta meta = ctx->au.meta;
+	venc_frame_ring_fill_t fill;
+
+	if (!ctx->frame_ring)
+		return;
+	if (ctx->tx.output_enabled && !ctx->au.ring_failed) {
+		if (!last)
+			meta.flags |= VENC_FRAME_FLAG_PARTIAL;
+		if (venc_frame_ring_write(ctx->frame_ring, &meta, data,
+				(uint32_t)len) != 0) {
+			ctx->au.ring_failed = 1;
+			__atomic_add_fetch(&ctx->output_drops, 1,
+				__ATOMIC_RELAXED);
+		}
+	}
+	cv610_service_ring_low_water(ctx,
+		venc_frame_ring_get_fill(ctx->frame_ring, &fill) == 0
+			? &fill : NULL);
+}
+
+/* The rest of the access-unit half, run once the access unit is complete:
+ * `*framep` holds all of it.  The recorder may take the buffer; *framep is
+ * NULL then. */
+static void cv610_au_end(Cv610RunnerContext *ctx, uint8_t **framep,
+	size_t frame_len)
+{
+	uint8_t *frame = *framep;
+	/* Sidecar state for this frame; sc_fillp is the single
+	 * ring reading shared by the low-water window and the
+	 * TRANSPORT_INFO trailer. */
+	venc_frame_ring_fill_t sc_fill;
+	const venc_frame_ring_fill_t *sc_fillp = NULL;
+	int sc_send;
+	Cv610TransportSample sc_ts;
+	int sc_have_ts = 0;
+	uint32_t sc_rtp_ts = 0;
+	uint16_t sc_seq_before = 0;
+	uint64_t sc_capture_us = 0;
+	uint64_t sc_ready_us = 0;
+
+	ctx->au.open = 0;
+	if (!ctx->slice_census_done && ctx->requested_slice_count > 1) {
+		uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame, frame_len);
+
+		if (vcl_nals > 0) {
+			fprintf(stderr, "[waybeam] CV610 slice census: "
+				"requested=%u expected=%u actual_vcl_nals=%u\n",
+				(unsigned)ctx->requested_slice_count,
+				(unsigned)ctx->delivered_slice_count,
+				(unsigned)vcl_nals);
+			ctx->delivered_slice_count = vcl_nals > 255u
+				? 255u : (uint8_t)vcl_nals;
+			ctx->slice_census_done = 1;
+		}
+	}
+
+	/* Sidecar (protocols/rtp-sidecar.md).  The socket itself
+	 * is polled at the top of the loop so it stays responsive
+	 * while no frames are produced; here we only decide
+	 * whether to build a datagram.  fd > 0, not >= 0: the
+	 * listener is always >= 3 and 0 means "never initialised",
+	 * per rtp_sidecar_sender_close().  Gating on an actual
+	 * subscriber spares an unsubscribed craft the clock read,
+	 * the datagram assembly and up to four sendto calls; the
+	 * ring fill is read every frame regardless, for the
+	 * low-water window. */
+	sc_send = 0;
+	if (ctx->sidecar.fd > 0) {
+		if (rtp_sidecar_is_subscribed(&ctx->sidecar)) {
+			sc_send = 1;
+			/* Snapshot before the write: the packetizer
+			 * advances seq and timestamp as it sends. */
+			sc_rtp_ts = ctx->rtp.timestamp;
+			sc_seq_before = ctx->rtp.seq;
+			sc_capture_us = ctx->au.capture_us;
+			sc_ready_us = wb_monotonic_us();
+		}
+	}
+
+	if (ctx->frame_ring) {
+		/* The ring's low-water gauge is published
+		 * unconditionally, so it has to keep being
+		 * measured even while nothing is written --
+		 * otherwise it freezes at its last value and a
+		 * consumer cannot tell a stale reading from a
+		 * live one.  With slice output every slice is an
+		 * entry of its own, written and measured as it
+		 * came (cv610_publish_slice). */
+		if (!ctx->slice_output && ctx->tx.output_enabled) {
+			int write_ret = venc_frame_ring_write(
+				ctx->frame_ring, &ctx->au.meta,
+				frame, (uint32_t)frame_len);
+			if (write_ret != 0)
+				__atomic_add_fetch(&ctx->output_drops,
+					1, __ATOMIC_RELAXED);
+		}
+		if (venc_frame_ring_get_fill(ctx->frame_ring,
+			&sc_fill) == 0)
+			sc_fillp = &sc_fill;
+		if (!ctx->slice_output)
+			cv610_service_ring_low_water(ctx, sc_fillp);
+	} else if (ctx->tx.output_enabled &&
+		ctx->tx.socket_handle >= 0) {
+		/* cv610_output_write owns per-datagram drop accounting. */
+		(void)cv610_send_rtp_frame(ctx, frame, frame_len);
+	}
+
+	/* Maintain the latched pressure flag on the producer
+	 * thread, every frame and whether or not anyone is
+	 * subscribed — a counter that only advanced under a
+	 * subscription would report frames since the subscription,
+	 * and the flag's 75/50 hysteresis needs to see every
+	 * sample to release correctly.  Same shared helper the
+	 * SigmaStar backends use, so the wire means one thing. */
+	/* have_fill, not just active: an unmeasured queue must not be
+	 * observed as an empty one. */
+	if (cv610_collect_transport(ctx, sc_fillp, &sc_ts) == 0 &&
+		sc_ts.active && sc_ts.have_fill) {
+		int p_state = __atomic_load_n(&ctx->pressure_state,
+			__ATOMIC_RELAXED);
+		uint32_t p_frames = __atomic_load_n(
+			&ctx->pressure_frames, __ATOMIC_RELAXED);
+
+		venc_observe_pressure(sc_ts.fill_pct, &p_state,
+			&p_frames);
+		/* Single writer (this thread); relaxed is enough, and
+		 * it is what Star6E publishes this state with. */
+		__atomic_store_n(&ctx->pressure_state, p_state,
+			__ATOMIC_RELAXED);
+		__atomic_store_n(&ctx->pressure_frames, p_frames,
+			__ATOMIC_RELAXED);
+		/* Fold this frame's observation back into the sample
+		 * the trailer will use, so fill_pct, in_pressure and
+		 * the counter all describe ONE observation.  Sampling
+		 * twice let a trailer carry fill_pct=10 beside
+		 * in_pressure=1 on the socket transports, where each
+		 * call is its own SIOCOUTQ. */
+		sc_ts.in_pressure = p_state;
+		sc_ts.pressure_frames = p_frames;
+		sc_have_ts = 1;
+	}
+
+	if (sc_send) {
+		RtpSidecarEncInfo enc;
+		RtpSidecarTransportInfo tinfo;
+		const RtpSidecarTransportInfo *tinfo_ptr = NULL;
+
+		/* Only what CV610 genuinely knows at this point.
+		 * complexity and scene_change stay 0: both come from
+		 * the shared scene detector, which this backend does
+		 * not compile in.  gop_state stays 0 because
+		 * nothing in this tree ever writes it — no backend
+		 * produces it, so this is not a CV610 gap.  Note the
+		 * spec reserves no "absent" sentinel for these, so a
+		 * consumer cannot tell a real 0 from an unproduced
+		 * one; see the follow-up on protocols/rtp-sidecar.md. */
+		memset(&enc, 0, sizeof(enc));
+		enc.frame_size_bytes = (uint32_t)frame_len;
+		enc.frame_type = ctx->au.is_idr ? RTP_SIDECAR_FRAME_IDR
+			: RTP_SIDECAR_FRAME_P;
+		/* Left 0 deliberately, like complexity/scene_change/
+		 * gop_state just below: the field means "the controller
+		 * REQUESTED an IDR after this frame", and this backend has
+		 * no such controller.  Setting it on every IDR made it a
+		 * duplicate of frame_type and FLAG_KEYFRAME, and a ground
+		 * consumer that sums it as "IDR insertions" would read a
+		 * once-per-GOP static scene as one insertion per second
+		 * while an identically configured SigmaStar craft reports
+		 * zero. */
+		enc.idr_inserted = 0;
+		/* start_qp is the encoder's own per-frame value and is
+		 * exactly what the contract asks for ("start QP /
+		 * closest available per-frame QP"). */
+		enc.qp = ctx->au.qp > 255u ? 255u : (uint8_t)ctx->au.qp;
+		enc.frames_since_idr = ctx->frames_since_idr;
+
+		if (sc_have_ts) {
+			const Cv610TransportSample *ts = &sc_ts;
+
+			memset(&tinfo, 0, sizeof(tinfo));
+			tinfo.fill_pct = ts->fill_pct;
+			tinfo.in_pressure = ts->in_pressure ? 1 : 0;
+			tinfo.transport_drops = (uint32_t)ts->transport_drops;
+			/* Despite the name this is "frames observed in
+			 * pressure" on every backend — see venc_ring.h;
+			 * the wire name is kept for ABI stability across
+			 * the v0.9.2 frame-skip rollback and no backend
+			 * has ever dropped for pressure. */
+			tinfo.pressure_drops = ts->pressure_frames;
+			tinfo.packets_sent = (uint32_t)ts->packets_sent;
+			tinfo_ptr = &tinfo;
+		}
+
+		/* Under frame-shm there is no RTP session, so ssrc,
+		 * timestamp and both seq fields are 0 — the same
+		 * thing Star6E puts on the wire for a non-RTP
+		 * transport, where rtp_session_init() is skipped.
+		 * The information lives in the trailer instead. */
+		rtp_sidecar_send_frame_transport(&ctx->sidecar,
+			ctx->rtp.ssrc, sc_rtp_ts, sc_seq_before,
+			(uint16_t)(ctx->rtp.seq - sc_seq_before),
+			sc_capture_us, sc_ready_us, &enc, tinfo_ptr);
+	}
+	__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
+	/* The cut's hold on the super-frame threshold runs out:
+	 * back to the threshold of the rate in force. */
+	if (__atomic_load_n(&ctx->max_frame_hold_aus,
+		__ATOMIC_RELAXED) &&
+	    __atomic_sub_fetch(&ctx->max_frame_hold_aus, 1,
+		__ATOMIC_ACQ_REL) == 0)
+		(void)cv610_write_max_frame(ctx, 0);
+	/* Beside the frame/byte counters, NOT inside the sidecar
+	 * block above: that one is gated on a live subscriber, so
+	 * putting the watch there made it observe only while a probe
+	 * happened to be attached -- measured on .181, an overrun
+	 * that delivered 12x its target logged nothing with no probe
+	 * running. */
+	pipeline_common_rate_watch(&ctx->rate_watch, &ctx->config,
+		(uint32_t)frame_len, wb_monotonic_us());
+	if (ctx->debug_osd)
+		debug_osd_sample_cpu(ctx->debug_osd);
+	cv610_report_frame_status(ctx);
+
+	/* Mirror-mode recording: hand the SAME buffer the
+	 * transport just used to the writer thread and let it
+	 * block on the disk instead of this loop.  Ownership
+	 * transfers, so there is no extra copy — the access unit
+	 * is already one contiguous buffer, and push() frees it
+	 * whether it is queued or dropped.
+	 *
+	 * This has to stay off the drain loop: a blocking write
+	 * here delays ss_mpi_venc_release_stream() below, which
+	 * backs up the encoder's output queue and stalls the LIVE
+	 * transport, not just the recording. */
+	/* A recorder that stopped ITSELF (disk full, write
+	 * error) is torn down AFTER the release in cv610_run —
+	 * see that site for why. */
+	if (ctx->rec_writer) {
+		struct timespec rec_now;
+
+		clock_gettime(CLOCK_MONOTONIC, &rec_now);
+		(void)venc_rec_writer_push(ctx->rec_writer,
+			frame, frame_len,
+			ts_mux_timespec_to_pts(
+				(uint32_t)rec_now.tv_sec,
+				(uint32_t)rec_now.tv_nsec),
+			ctx->au.is_idr);
+		*framep = NULL;  /* the writer owns it now */
+	}
+}
+
+/* Ends the access unit being assembled from several fetches. */
+static void cv610_au_end_assembled(Cv610RunnerContext *ctx)
+{
+	cv610_au_end(ctx, &ctx->au.buf, ctx->au.len);
+	if (!ctx->au.buf)
+		ctx->au.cap = 0;  /* the recorder took it */
+	ctx->au.len = 0;
+}
+
 static int cv610_run(void *opaque)
 {
 	Cv610RunnerContext *ctx = opaque;
@@ -3110,52 +3552,22 @@ static int cv610_run(void *opaque)
 			int is_enhance = ctx->svct_active &&
 				stream.h265_info.ref_type ==
 					OT_VENC_ENHANCE_P_SLICE_NOT_FOR_REF;
-			int is_idr;
-			size_t patched = 0;
-			/* Sidecar state for this frame; sc_fillp is the single
-			 * ring reading shared by the low-water window and the
-			 * TRANSPORT_INFO trailer. */
-			venc_frame_ring_fill_t sc_fill;
-			const venc_frame_ring_fill_t *sc_fillp = NULL;
-			int sc_send;
-			Cv610TransportSample sc_ts;
-			int sc_have_ts = 0;
-			uint32_t sc_rtp_ts = 0;
-			uint16_t sc_seq_before = 0;
-			uint64_t sc_capture_us = 0;
-			uint64_t sc_ready_us = 0;
+			/* With one slice every fetch is a whole access unit, as
+			 * before.  With more, the access unit is assembled over
+			 * its fetches; it ends on the fetch the driver marks
+			 * is_frame_end -- or, should the mark be missing, at the
+			 * next picture's first slice. */
+			int last = !ctx->au_assemble ||
+				(stream.pack_cnt &&
+				 stream.pack[stream.pack_cnt - 1].is_frame_end);
 
-			if (is_enhance)
-				patched = h26x_util_hevc_patch_trail_r_to_n(frame, frame_len);
-			if (ctx->svct_active && ctx->ref_census_frames < 64u) {
-				unsigned int ref_type = (unsigned int)stream.h265_info.ref_type;
+			if (is_enhance) {
+				size_t patched = h26x_util_hevc_patch_trail_r_to_n(
+					frame, frame_len);
 
-				if (ref_type < OT_VENC_P_SLICE_BUTT)
-					ctx->ref_type_counts[ref_type]++;
-				ctx->trail_n_patched += (uint32_t)patched;
-				ctx->ref_census_frames++;
-				if (ctx->ref_census_frames == 64u) {
-					fprintf(stderr, "[waybeam] CV610 ref census: frames=64 "
-						"types=%u,%u,%u,%u,%u,%u trail_n_patched=%u\n",
-						(unsigned)ctx->ref_type_counts[0],
-						(unsigned)ctx->ref_type_counts[1],
-						(unsigned)ctx->ref_type_counts[2],
-						(unsigned)ctx->ref_type_counts[3],
-						(unsigned)ctx->ref_type_counts[4],
-						(unsigned)ctx->ref_type_counts[5],
-						(unsigned)ctx->trail_n_patched);
-				}
+				if (ctx->ref_census_frames < 64u)
+					ctx->trail_n_patched += (uint32_t)patched;
 			}
-			VencFrameMeta frame_meta;
-
-			is_idr = cv610_frame_is_idr(frame, frame_len);
-			/* Outside the sidecar gate on purpose: a counter that only
-			 * advances while a probe is subscribed would report the
-			 * frames since the subscription, not since the IDR. */
-			if (is_idr)
-				ctx->frames_since_idr = 0;
-			else if (ctx->frames_since_idr < UINT16_MAX)
-				ctx->frames_since_idr++;
 			if (stream.pack_cnt)
 				cv610_backlog_observe(ctx,
 					cv610_capture_us_from_pts(ctx,
@@ -3165,260 +3577,31 @@ static int cv610_run(void *opaque)
 			if (cv610_stream_has_p_slice(&stream))
 				__atomic_store_n(&ctx->last_p_qp,
 					stream.h265_info.start_qp, __ATOMIC_RELAXED);
-			if (!ctx->slice_census_done &&
-			    ctx->requested_slice_count > 1) {
-				uint32_t vcl_nals = cv610_frame_vcl_nal_count(frame,
-					frame_len);
 
-				if (vcl_nals > 0) {
-					fprintf(stderr, "[waybeam] CV610 slice census: "
-						"requested=%u expected=%u actual_vcl_nals=%u\n",
-						(unsigned)ctx->requested_slice_count,
-						(unsigned)ctx->delivered_slice_count,
-						(unsigned)vcl_nals);
-					ctx->delivered_slice_count = vcl_nals > 255u
-						? 255u : (uint8_t)vcl_nals;
-					ctx->slice_census_done = 1;
-				}
+			if (ctx->au_assemble && ctx->au.open &&
+			    cv610_starts_picture(frame, frame_len) == 1) {
+				if (!ctx->au_end_unmarked_warned)
+					fprintf(stderr, "WARNING: CV610 access unit "
+						"without an is_frame_end mark; ended "
+						"at the next picture\n");
+				ctx->au_end_unmarked_warned = 1;
+				cv610_au_end_assembled(ctx);
 			}
-
-			/* Sidecar (protocols/rtp-sidecar.md).  The socket itself
-			 * is polled at the top of the loop so it stays responsive
-			 * while no frames are produced; here we only decide
-			 * whether to build a datagram.  fd > 0, not >= 0: the
-			 * listener is always >= 3 and 0 means "never initialised",
-			 * per rtp_sidecar_sender_close().  Gating on an actual
-			 * subscriber spares an unsubscribed craft the clock read,
-			 * the datagram assembly and up to four sendto calls; the
-			 * ring fill is read every frame regardless, for the
-			 * low-water window. */
-			sc_send = 0;
-			if (ctx->sidecar.fd > 0) {
-				if (rtp_sidecar_is_subscribed(&ctx->sidecar)) {
-					sc_send = 1;
-					/* Snapshot before the write: the packetizer
-					 * advances seq and timestamp as it sends. */
-					sc_rtp_ts = ctx->rtp.timestamp;
-					sc_seq_before = ctx->rtp.seq;
-					sc_capture_us = stream.pack_cnt
-						? cv610_capture_us_from_pts(ctx,
-							(uint64_t)stream.pack[0].pts)
-						: 0;
-					sc_ready_us = wb_monotonic_us();
-				}
-			}
-
-			/* One seqlock read per frame, before either transport is
-			 * touched, so every datagram of this access unit uses
-			 * the same destination and one enable state. */
-			cv610_transport_begin_frame(ctx);
-
-			/* GDR bookkeeping tracks the ENCODER's intra-refresh
-			 * phase, so it advances every frame regardless of whether
-			 * the frame is transmitted.  Skipping it while
-			 * outgoing.enabled=false desynced meta.gdr_pos from the
-			 * real wavefront for every frame after a re-enable, until
-			 * the next IDR happened to resync it -- and the link
-			 * consumer assigns slice importance from that position. */
-			memset(&frame_meta, 0, sizeof(frame_meta));
-			/* The ring's pts is a capture time on CLOCK_MONOTONIC, the
-			 * same clock as the sidecar's capture_us and as Star6E's
-			 * ring: a consumer can then compare it with its own clock
-			 * (ar8030-transport maps it onto the ground for per-frame
-			 * latency).  The raw MPP pts sits seconds away from that
-			 * clock on this SoC, so convert it; fall back to the raw
-			 * value only if the MPP timebase could not be read. */
-			if (stream.pack_cnt) {
-				uint64_t cap_us = cv610_capture_us_from_pts(ctx,
-					(uint64_t)stream.pack[0].pts);
-				frame_meta.pts = cap_us ? (uint32_t)cap_us
-					: (uint32_t)stream.pack[0].pts;
-			}
-			frame_meta.codec = VENC_FRAME_CODEC_H265;
-			frame_meta.flags = is_idr ? VENC_FRAME_FLAG_IDR : 0;
-			if (is_enhance)
-				frame_meta.flags |= VENC_FRAME_FLAG_ENHANCE;
-			if (is_idr) {
-				ctx->gdr_counter = 0;
-			} else if (ctx->gdr_active && ctx->gdr_cycle_len > 0) {
-				frame_meta.flags |= VENC_FRAME_FLAG_GDR;
-				frame_meta.gdr_pos = ctx->gdr_counter;
-				frame_meta.gdr_len = ctx->gdr_cycle_len;
-				ctx->gdr_counter++;
-				if (ctx->gdr_counter >= ctx->gdr_cycle_len)
-					ctx->gdr_counter = 0;
-			}
-
-			if (ctx->frame_ring) {
-				/* The ring's low-water gauge is published
-				 * unconditionally, so it has to keep being
-				 * measured even while nothing is written --
-				 * otherwise it freezes at its last value and a
-				 * consumer cannot tell a stale reading from a
-				 * live one. */
-				if (ctx->tx.output_enabled) {
-					int write_ret = venc_frame_ring_write(
-						ctx->frame_ring, &frame_meta,
-						frame, (uint32_t)frame_len);
-					if (write_ret != 0)
-						__atomic_add_fetch(&ctx->output_drops,
-							1, __ATOMIC_RELAXED);
-				}
-				if (venc_frame_ring_get_fill(ctx->frame_ring,
-					&sc_fill) == 0)
-					sc_fillp = &sc_fill;
-				cv610_service_ring_low_water(ctx, sc_fillp);
-			} else if (ctx->tx.output_enabled &&
-				ctx->tx.socket_handle >= 0) {
-				/* cv610_output_write owns per-datagram drop accounting. */
-				(void)cv610_send_rtp_frame(ctx, frame, frame_len);
-			}
-
-			/* Maintain the latched pressure flag on the producer
-			 * thread, every frame and whether or not anyone is
-			 * subscribed — a counter that only advanced under a
-			 * subscription would report frames since the subscription,
-			 * and the flag's 75/50 hysteresis needs to see every
-			 * sample to release correctly.  Same shared helper the
-			 * SigmaStar backends use, so the wire means one thing. */
-			/* have_fill, not just active: an unmeasured queue must not be
-			 * observed as an empty one. */
-			if (cv610_collect_transport(ctx, sc_fillp, &sc_ts) == 0 &&
-				sc_ts.active && sc_ts.have_fill) {
-				int p_state = __atomic_load_n(&ctx->pressure_state,
-					__ATOMIC_RELAXED);
-				uint32_t p_frames = __atomic_load_n(
-					&ctx->pressure_frames, __ATOMIC_RELAXED);
-
-				venc_observe_pressure(sc_ts.fill_pct, &p_state,
-					&p_frames);
-				/* Single writer (this thread); relaxed is enough, and
-				 * it is what Star6E publishes this state with. */
-				__atomic_store_n(&ctx->pressure_state, p_state,
-					__ATOMIC_RELAXED);
-				__atomic_store_n(&ctx->pressure_frames, p_frames,
-					__ATOMIC_RELAXED);
-				/* Fold this frame's observation back into the sample
-				 * the trailer will use, so fill_pct, in_pressure and
-				 * the counter all describe ONE observation.  Sampling
-				 * twice let a trailer carry fill_pct=10 beside
-				 * in_pressure=1 on the socket transports, where each
-				 * call is its own SIOCOUTQ. */
-				sc_ts.in_pressure = p_state;
-				sc_ts.pressure_frames = p_frames;
-				sc_have_ts = 1;
-			}
-
-			if (sc_send) {
-				RtpSidecarEncInfo enc;
-				RtpSidecarTransportInfo tinfo;
-				const RtpSidecarTransportInfo *tinfo_ptr = NULL;
-
-				/* Only what CV610 genuinely knows at this point.
-				 * complexity and scene_change stay 0: both come from
-				 * the shared scene detector, which this backend does
-				 * not compile in.  gop_state stays 0 because
-				 * nothing in this tree ever writes it — no backend
-				 * produces it, so this is not a CV610 gap.  Note the
-				 * spec reserves no "absent" sentinel for these, so a
-				 * consumer cannot tell a real 0 from an unproduced
-				 * one; see the follow-up on protocols/rtp-sidecar.md. */
-				memset(&enc, 0, sizeof(enc));
-				enc.frame_size_bytes = (uint32_t)frame_len;
-				enc.frame_type = is_idr ? RTP_SIDECAR_FRAME_IDR
-					: RTP_SIDECAR_FRAME_P;
-				/* Left 0 deliberately, like complexity/scene_change/
-				 * gop_state just below: the field means "the controller
-				 * REQUESTED an IDR after this frame", and this backend has
-				 * no such controller.  Setting it on every IDR made it a
-				 * duplicate of frame_type and FLAG_KEYFRAME, and a ground
-				 * consumer that sums it as "IDR insertions" would read a
-				 * once-per-GOP static scene as one insertion per second
-				 * while an identically configured SigmaStar craft reports
-				 * zero. */
-				enc.idr_inserted = 0;
-				/* start_qp is the encoder's own per-frame value and is
-				 * exactly what the contract asks for ("start QP /
-				 * closest available per-frame QP").  The struct is
-				 * already in hand -- the SVC-T check above reads
-				 * h265_info.ref_type from it. */
-				enc.qp = stream.h265_info.start_qp > 255u
-					? 255u : (uint8_t)stream.h265_info.start_qp;
-				enc.frames_since_idr = ctx->frames_since_idr;
-
-				if (sc_have_ts) {
-					const Cv610TransportSample *ts = &sc_ts;
-
-					memset(&tinfo, 0, sizeof(tinfo));
-					tinfo.fill_pct = ts->fill_pct;
-					tinfo.in_pressure = ts->in_pressure ? 1 : 0;
-					tinfo.transport_drops = (uint32_t)ts->transport_drops;
-					/* Despite the name this is "frames observed in
-					 * pressure" on every backend — see venc_ring.h;
-					 * the wire name is kept for ABI stability across
-					 * the v0.9.2 frame-skip rollback and no backend
-					 * has ever dropped for pressure. */
-					tinfo.pressure_drops = ts->pressure_frames;
-					tinfo.packets_sent = (uint32_t)ts->packets_sent;
-					tinfo_ptr = &tinfo;
-				}
-
-				/* Under frame-shm there is no RTP session, so ssrc,
-				 * timestamp and both seq fields are 0 — the same
-				 * thing Star6E puts on the wire for a non-RTP
-				 * transport, where rtp_session_init() is skipped.
-				 * The information lives in the trailer instead. */
-				rtp_sidecar_send_frame_transport(&ctx->sidecar,
-					ctx->rtp.ssrc, sc_rtp_ts, sc_seq_before,
-					(uint16_t)(ctx->rtp.seq - sc_seq_before),
-					sc_capture_us, sc_ready_us, &enc, tinfo_ptr);
-			}
-			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
-			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
-			/* The cut's hold on the super-frame threshold runs out:
-			 * back to the threshold of the rate in force. */
-			if (__atomic_load_n(&ctx->max_frame_hold_aus,
-				__ATOMIC_RELAXED) &&
-			    __atomic_sub_fetch(&ctx->max_frame_hold_aus, 1,
-				__ATOMIC_ACQ_REL) == 0)
-				(void)cv610_write_max_frame(ctx, 0);
-			/* Beside the frame/byte counters, NOT inside the sidecar
-			 * block above: that one is gated on a live subscriber, so
-			 * putting the watch there made it observe only while a probe
-			 * happened to be attached -- measured on .181, an overrun
-			 * that delivered 12x its target logged nothing with no probe
-			 * running. */
-			pipeline_common_rate_watch(&ctx->rate_watch, &ctx->config,
-				(uint32_t)frame_len, wb_monotonic_us());
-			if (ctx->debug_osd)
-				debug_osd_sample_cpu(ctx->debug_osd);
-			cv610_report_frame_status(ctx);
-
-			/* Mirror-mode recording: hand the SAME buffer the
-			 * transport just used to the writer thread and let it
-			 * block on the disk instead of this loop.  Ownership
-			 * transfers, so there is no extra copy — cv610_copy_stream
-			 * already produced the contiguous access unit, and push()
-			 * frees it whether it is queued or dropped.
-			 *
-			 * This has to stay off the drain loop: a blocking write
-			 * here delays ss_mpi_venc_release_stream() below, which
-			 * backs up the encoder's output queue and stalls the LIVE
-			 * transport, not just the recording. */
-			/* A recorder that stopped ITSELF (disk full, write
-			 * error) is torn down AFTER the release below, not
-			 * here — see that site for why. */
-			if (ctx->rec_writer) {
-				struct timespec rec_now;
-
-				clock_gettime(CLOCK_MONOTONIC, &rec_now);
-				(void)venc_rec_writer_push(ctx->rec_writer,
-					frame, frame_len,
-					ts_mux_timespec_to_pts(
-						(uint32_t)rec_now.tv_sec,
-						(uint32_t)rec_now.tv_nsec),
-					is_idr);
-				frame = NULL;  /* the writer owns it now */
+			if (!ctx->au.open)
+				cv610_au_begin(ctx, &stream, frame, frame_len,
+					is_enhance);
+			ctx->au.qp = stream.h265_info.start_qp;
+			if (!ctx->au_assemble) {
+				cv610_au_end(ctx, &frame, frame_len);
+			} else {
+				if (ctx->slice_output)
+					cv610_publish_slice(ctx, frame,
+						frame_len, last);
+				if (cv610_au_append(ctx, frame, frame_len) != 0)
+					fprintf(stderr, "WARNING: CV610 access unit "
+						"assembly out of memory\n");
+				if (last)
+					cv610_au_end_assembled(ctx);
 			}
 			free(frame);
 		}
@@ -3486,6 +3669,8 @@ static void cv610_teardown(void *opaque)
 	ctx->debug_osd = NULL;
 	cv610_venc_stop(ctx);
 	cv610_pipeline_stop();
+	free(ctx->au.buf);
+	ctx->au.buf = NULL;
 }
 
 static int cv610_map_result(int result)

@@ -38,6 +38,9 @@ typedef struct {
 	uint32_t split_mode;
 	uint32_t split_size;
 	uint32_t expected_count;
+	/* slice_output_en: each slice is handed out as soon as it is encoded.
+	 * Only with more than one slice -- one slice is the whole picture. */
+	uint32_t output_en;
 } Cv610SliceConfig;
 
 typedef struct {

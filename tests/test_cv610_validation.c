@@ -228,6 +228,15 @@ static int test_encoder_config(void)
 	failures += expect("enc_slice_17_geometry",
 		enc.slice.enabled && enc.slice.split_mode == 1 &&
 		enc.slice.split_size == 2 && enc.slice.expected_count == 17);
+	failures += expect("enc_slice_output_default_off", !enc.slice.output_en);
+	cfg.video0.slice_output = true;
+	(void)cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc);
+	failures += expect("enc_slice_output_on", enc.slice.output_en == 1);
+	cfg.video0.slice_count = 1;
+	(void)cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc);
+	failures += expect("enc_slice_output_needs_slices",
+		!enc.slice.enabled && !enc.slice.output_en);
+	cfg.video0.slice_output = false;
 	cfg.video0.slice_count = 12;
 	(void)cv610_encoder_config_derive(&cfg, 1920, 1080, 100, &enc);
 	failures += expect("enc_slice_12_geometry",
