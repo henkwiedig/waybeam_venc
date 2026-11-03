@@ -1,5 +1,41 @@
 # History
 
+## [0.86.1] - 2026-11-03
+
+CV610: two dropped frames fixed, one at every intra-refresh cycle start and one
+after every large bitrate cut. Neither was caused by the bitrate API call
+itself: re-posting the same bitrate 300 times in 120 s left the drop rate and
+latency around each call identical to random instants.
+
+- **One access unit is one output entry again.** With `by_frame=n` (needed on
+  the OS02K10) the driver hands out an access unit one NAL at a time, so every
+  refresh-cycle start and every IDR came out as six fetches: VPS, SPS, PPS,
+  two SEI, then the slice. Each was published as an access unit of its own --
+  a frame-shm ring entry, a sidecar message, a `gdr_pos` step -- and
+  ar8030-transport-tx writes each ring entry with its own `bb_socket_write()`.
+  The five tiny writes delayed the slice behind them on the ground by 8-20 ms,
+  past its display deadline. A fetch holding only VPS/SPS/PPS/SEI is now held
+  and sent in front of the next one.
+- **No IDR after a bitrate cut.** With `maxFramePct` set, the first P-frame
+  after a cut of more than about a third is still near the old QP, far above
+  a threshold computed from the new rate. The super-frame re-encode turned it
+  into an IDR: a second encoder pass (capture -> encode 23 ms instead of 12)
+  and a frame that missed its display slot 99% of the time. After a cut the
+  threshold now keeps the old rate for 3 access units, then follows the new
+  one.
+- **Measured** on the Ascent Lite (OS02K10 1080p60) over the AR8030 link to the
+  VRX Pro with its vsync lock, 120 s each:
+
+  | | before | after |
+  |---|---|---|
+  | no bitrate changes: frames not shown | 0.41/s, 37 of them on the cycle-start frame | 0.26/s, none on any one cycle position |
+  | 21 <-> 6 Mbit/s every 0.2-0.6 s: IDRs | 151 | 3 |
+  | link controller (tx PI) in charge | 0.42/s, 4 IDRs a minute, 96 bitrate changes a minute | 0.30/s, no IDR, rate steady |
+
+  The late cycle-start frame had also kept the transmitter's link controller
+  oscillating: each one spiked its queue delay to 20-28 ms, which it answered
+  with a cut and a ramp back up every 2 s.
+
 ## [0.86.0] - 2026-10-22
 
 CV610: **`video0.maxFramePct`**, a P-frame size cap. A P-frame bigger than

@@ -63,6 +63,8 @@
 #define CV610_VENC_CHN SNS_VENC_CHN
 #define CV610_FRAME_RING_SLOTS 8
 #define CV610_FRAME_RING_BYTES (512u * 1024u)
+/* Room for one access unit's VPS + SPS + PPS + SEI (~120 bytes measured). */
+#define CV610_AU_PREFIX_MAX 4096u
 
 /* Sensor-specific MIPI wiring: set by the Makefile's CV610_SENSOR_PLUGIN
  * (imx662 default, os02k10) as -D values; these fallbacks only fire if
@@ -217,6 +219,11 @@ typedef struct {
 	uint32_t applied_gop_frames;
 	uint32_t fps_divisor;       /* video0.fps_divisor in force; 0 reads as 1 */
 	uint32_t max_frame_pct;     /* video0.max_frame_pct in force; 0 = off */
+	/* After a bitrate cut the super-frame threshold stays at the old rate
+	 * for max_frame_hold_aus more access units, see
+	 * cv610_update_venc_attr(). */
+	uint32_t max_frame_hold_kbps;
+	uint32_t max_frame_hold_aus;
 	uint32_t ref_census_frames;
 	uint32_t ref_type_counts[OT_VENC_P_SLICE_BUTT];
 	uint32_t trail_n_patched;
@@ -265,6 +272,10 @@ typedef struct {
 	/* start_qp of the last P slice, written by the producer thread, read by
 	 * cv610_seed_idr_start_qp() on the httpd thread.  0 = none yet. */
 	uint32_t last_p_qp;
+	/* Parameter sets and SEI held for the slice behind them, see
+	 * cv610_au_prefix_merge(). */
+	uint8_t au_prefix[CV610_AU_PREFIX_MAX];
+	size_t au_prefix_len;
 } Cv610RunnerContext;
 
 /* Backend selection and the vendor MPP graph are process-singleton. The
@@ -309,6 +320,7 @@ static void cv610_publish_encoder_status(
 
 #define CV610_MAX_FRAME_REENCODE_FPS 60u
 #define CV610_MAX_FRAME_DISCARD_QP_DELTA 4u
+#define CV610_MAX_FRAME_CUT_HOLD_AUS 3u
 
 static int cv610_write_max_frame(const Cv610RunnerContext *ctx, int verbose);
 
@@ -318,6 +330,7 @@ static int cv610_write_max_frame(const Cv610RunnerContext *ctx, int verbose);
 static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 	unsigned int fields)
 {
+	Cv610RunnerContext *ctx = g_cv610_runner;
 	ot_venc_chn_attr attr;
 	td_s32 ret;
 
@@ -325,6 +338,29 @@ static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 	ret = ss_mpi_venc_get_chn_attr(CV610_VENC_CHN, &attr);
 	if (ret != TD_SUCCESS || attr.rc_attr.rc_mode != OT_VENC_RC_MODE_H265_CBR)
 		return -1;
+	/* A cut leaves the next frame or two at the QP of the old rate, far
+	 * above a threshold computed from the new one: the super-frame
+	 * re-encode then turned that frame into an IDR -- a second encoder
+	 * pass (capture -> encode 23 ms instead of 12) and a frame that missed
+	 * its display slot 99% of the time (bench 2026-11-03, 1080p60, cuts
+	 * 21 -> 6 Mbit/s with maxFramePct 150: an IDR after every cut, none
+	 * with maxFramePct 0; 21 -> 15 Mbit/s: after 3% of them).  The rate
+	 * controller has the QP up within a frame, so the threshold keeps the
+	 * old rate for CV610_MAX_FRAME_CUT_HOLD_AUS access units and the
+	 * producer tightens it after that. */
+	if ((fields & 1u) && ctx && ctx->max_frame_pct &&
+	    bitrate < attr.rc_attr.h265_cbr.bit_rate) {
+		uint32_t hold = attr.rc_attr.h265_cbr.bit_rate;
+		uint32_t prev = __atomic_load_n(&ctx->max_frame_hold_kbps,
+			__ATOMIC_RELAXED);
+
+		if (__atomic_load_n(&ctx->max_frame_hold_aus, __ATOMIC_RELAXED) &&
+		    prev > hold)
+			hold = prev;
+		__atomic_store_n(&ctx->max_frame_hold_kbps, hold, __ATOMIC_RELAXED);
+		__atomic_store_n(&ctx->max_frame_hold_aus,
+			CV610_MAX_FRAME_CUT_HOLD_AUS, __ATOMIC_RELEASE);
+	}
 	if (fields & 1u)
 		attr.rc_attr.h265_cbr.bit_rate = bitrate;
 	if (fields & 2u)
@@ -332,7 +368,7 @@ static int cv610_update_venc_attr(uint32_t bitrate, uint32_t gop,
 	ret = ss_mpi_venc_set_chn_attr(CV610_VENC_CHN, &attr);
 	if (ret != TD_SUCCESS)
 		return -1;
-	(void)cv610_write_max_frame(g_cv610_runner, 0);
+	(void)cv610_write_max_frame(ctx, 0);
 	return 0;
 }
 
@@ -598,7 +634,15 @@ static int cv610_write_max_frame(const Cv610RunnerContext *ctx, int verbose)
 	if (ss_mpi_venc_get_super_frame_strategy(CV610_VENC_CHN, &sf) != TD_SUCCESS)
 		return -1;
 	if (pct) {
-		bits = (uint64_t)attr.rc_attr.h265_cbr.bit_rate * 1000u * pct /
+		uint32_t kbps = attr.rc_attr.h265_cbr.bit_rate;
+		uint32_t hold = __atomic_load_n(&ctx->max_frame_hold_kbps,
+			__ATOMIC_RELAXED);
+
+		/* Right after a cut: the old rate, see cv610_update_venc_attr(). */
+		if (__atomic_load_n(&ctx->max_frame_hold_aus, __ATOMIC_ACQUIRE) &&
+		    hold > kbps)
+			kbps = hold;
+		bits = (uint64_t)kbps * 1000u * pct /
 			100u / attr.rc_attr.h265_cbr.dst_frame_rate;
 		sf.super_frame_mode = OT_VENC_SUPER_FRAME_REENCODE;
 		sf.i_frame_bits_threshold = UINT32_MAX;
@@ -1228,6 +1272,62 @@ static void cv610_backlog_observe(Cv610RunnerContext *ctx, uint64_t capture_us,
 		b->au_pending = 0;
 		cv610_backlog_au_done(ctx, now_us - capture_us, now_us);
 	}
+}
+
+/* With by_frame=n the driver hands out an access unit one NAL at a time, so
+ * every refresh-cycle start (and every IDR) came out as six fetches: VPS,
+ * SPS, PPS, two SEI, then the slice.  Each fetch was published as an access
+ * unit of its own -- a ring entry, a sidecar message, a gdr_pos step -- and
+ * ar8030-transport-tx writes each ring entry with its own bb_socket_write(),
+ * a round trip to ar8030d.  The five tiny writes ahead of the slice delayed
+ * it on the ground by 8-20 ms (bench, 1080p60, 2026-11-03: the slice behind
+ * the parameter sets reached the ground ~43-54 ms after capture against
+ * ~34 ms for its neighbours), past the display deadline: that one frame was
+ * dropped in 14-21 of every 30 refresh cycles, a hitch every 2 s.
+ *
+ * A fetch holding nothing but VPS/SPS/PPS/SEI is kept back here and goes out
+ * in front of the next one, so an access unit is one ring entry again.
+ * Returns 1 if the fetch was kept back (*frame freed: nothing to send), 0 if
+ * *frame is to be sent, with whatever was kept back now in front of it. */
+static int cv610_au_prefix_merge(Cv610RunnerContext *ctx,
+	const ot_venc_stream *stream, uint8_t **frame, size_t *frame_len)
+{
+	int prefix_only = stream->pack_cnt > 0;
+	uint8_t *merged;
+	td_u32 i;
+
+	for (i = 0; i < stream->pack_cnt && prefix_only; i++) {
+		switch (stream->pack[i].data_type.h265_type) {
+		case OT_VENC_H265_NALU_VPS:
+		case OT_VENC_H265_NALU_SPS:
+		case OT_VENC_H265_NALU_PPS:
+		case OT_VENC_H265_NALU_SEI:
+			break;
+		default:
+			prefix_only = 0;
+			break;
+		}
+	}
+	if (prefix_only &&
+	    ctx->au_prefix_len + *frame_len <= sizeof(ctx->au_prefix)) {
+		memcpy(ctx->au_prefix + ctx->au_prefix_len, *frame, *frame_len);
+		ctx->au_prefix_len += *frame_len;
+		free(*frame);
+		*frame = NULL;
+		return 1;
+	}
+	if (!ctx->au_prefix_len)
+		return 0;
+	merged = malloc(ctx->au_prefix_len + *frame_len);
+	if (merged) {
+		memcpy(merged, ctx->au_prefix, ctx->au_prefix_len);
+		memcpy(merged + ctx->au_prefix_len, *frame, *frame_len);
+		free(*frame);
+		*frame = merged;
+		*frame_len += ctx->au_prefix_len;
+	}
+	ctx->au_prefix_len = 0;
+	return 0;
 }
 
 static int cv610_stream_has_p_slice(const ot_venc_stream *stream)
@@ -2898,6 +2998,7 @@ static int cv610_run(void *opaque)
 
 	if (venc_fd < 0)
 		return -1;
+	ctx->au_prefix_len = 0;
 	while (!cv610_pipeline_stop_requested()) {
 		ot_venc_chn_status status;
 		ot_venc_stream stream;
@@ -3004,7 +3105,8 @@ static int cv610_run(void *opaque)
 			free(stream.pack);
 			continue;
 		}
-		if (cv610_copy_stream(&stream, &frame, &frame_len) == 0) {
+		if (cv610_copy_stream(&stream, &frame, &frame_len) == 0 &&
+		    !cv610_au_prefix_merge(ctx, &stream, &frame, &frame_len)) {
 			int is_enhance = ctx->svct_active &&
 				stream.h265_info.ref_type ==
 					OT_VENC_ENHANCE_P_SLICE_NOT_FOR_REF;
@@ -3273,6 +3375,13 @@ static int cv610_run(void *opaque)
 			}
 			__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
 			__atomic_add_fetch(&ctx->bytes, frame_len, __ATOMIC_RELAXED);
+			/* The cut's hold on the super-frame threshold runs out:
+			 * back to the threshold of the rate in force. */
+			if (__atomic_load_n(&ctx->max_frame_hold_aus,
+				__ATOMIC_RELAXED) &&
+			    __atomic_sub_fetch(&ctx->max_frame_hold_aus, 1,
+				__ATOMIC_ACQ_REL) == 0)
+				(void)cv610_write_max_frame(ctx, 0);
 			/* Beside the frame/byte counters, NOT inside the sidecar
 			 * block above: that one is gated on a live subscriber, so
 			 * putting the watch there made it observe only while a probe
