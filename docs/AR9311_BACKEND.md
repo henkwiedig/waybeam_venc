@@ -129,6 +129,70 @@ schedule from the buffer's timestamp, which waybeam passes in at open:
   REQBUFS).  Without either, waybeam warns and runs without, at depth 2.
   The firmware runs one sub-frame sync instance at a time.
 
+## Strips
+
+`video0.strips` (restart; 2 in the AR9311 default config, 0 or 1 = one
+picture, at most 4) encodes the frame as that many horizontal strips, one
+wave5 instance each, and joins them into one H.265 picture with as many
+slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
+
+- **Why**: the AR9311 has one H.26x core (the vendor device tree has one
+  `h26x` node), so strips are not encoded in parallel: two strips queued
+  together take 8.1 ms against 7.1 ms for the whole frame, and letting both
+  into the firmware's command queue at once only saves the host's 0.17 ms
+  turnaround.  wave5 also has no early slice output on this firmware (the
+  bitstream is packed after the last CTU row).  What strips buy is the
+  overlap the vendor's low-delay "pattern" mode uses too
+  (`libldrt_pipeline.so` `AR_LDRT_PIPELINE_GetPattern`, 2-4 strips with
+  overlaps, decoded per stream and stitched on its ground): a strip is
+  queued as soon as the camera has written it and encoded while the camera
+  writes the strips below, and its slice goes onto the frame-shm ring at
+  once (`VENC_FRAME_FLAG_PARTIAL`), so the link carries the top of the
+  picture while the rest is being encoded.
+- **Layout** (`ar9311_strips_plan()`, host-tested): whole 64-line CTU rows,
+  the spare rows to the top strips, so the last strip, the one that decides
+  when the picture is complete, is the smallest: 9/8, 6/6/5, 5/4/4/4 rows.
+  Every strip but the last is queued at its last band's release time in the
+  sub-frame sync schedule (2 strips: the top at +9042 us); the last one
+  follows the camera from its first band with sub-frame sync (2 strips:
+  +9990 us).  The bitrate is split by height; IDR requests go to every
+  encoder right before a frame's first strip is queued, so all strips turn
+  IDR together.  Needs sub-frame sync and a frame-shm output; without either
+  waybeam warns and encodes one picture.
+- **Join**: strip 0's SPS gets the full height; the other strips' VPS/SPS/PPS
+  are dropped after a check that they match strip 0's, and each slice
+  header is rewritten to first_slice_segment_in_pic_flag 0 and its CTU
+  address in the whole picture.  The encoders run with the loop filter off
+  at slice boundaries (`V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY`),
+  so the decoder treats each seam as the encoders treated their picture
+  edges.  A frame whose strips disagree (POC, IDR) or fail to join is given
+  up and both encoders are asked for an IDR.
+- **Seams are not bit-exact**: a motion vector at a strip's edge (and its
+  interpolation taps) reads that encoder's padding while encoding but the
+  neighbouring strip's pixels while decoding.  Measured on recorded P1
+  strips (still scene, ~20 Mbit/s): up to ~0.1 % of the picture's pixels
+  differ, by up to 18-38 levels, all within 40 lines of a seam, until the
+  intra refresh wave passes the seam rows again (racing: every 9 frames).
+  Motion makes it larger.
+- **Measured** on a P1 -> VRX Pro at ~22 Mbit/s (PI rate control, 2 x 60 s
+  per setting; capture -> ground receiver, PixelPilot latency p50 / p99,
+  vsync-lock target, drops per 10 s, tx write time per frame):
+
+  | strips | capture->rx | p50 / p99 | lock target | drops | tx writes |
+  | --- | --- | --- | --- | --- | --- |
+  | 1 | 28.7 ms | 35.0 / 43.8 | 47.8 | 3.2 | 8.6 ms |
+  | 2 | 23.4 | 26.0 / 33.0 | 37.5 | 2.2 | 10.4 |
+  | 3 | 20.4 | 23.3 / 34.3 | 38.0 | 4.4 | 11.9 |
+  | 4 | 18.9 | 20.7 / 33.7 | 35.6 | 5.2 | 13.1 |
+
+  Every part costs the radio's write path ~1.5 ms, so beyond 2 strips the
+  median keeps falling while the tail, and with it the displayed latency,
+  hardly moves and drops grow.  2 is the default.  The VRX Pro decodes the
+  picture slice by slice; the single-slice stream never used that.
+- The transmitter's capture -> write start figure is meaningless with
+  strips: the first part is written before the published capture time
+  (the depth-2 convention, frame complete + 0.9 ms).
+
 ## Auto-exposure
 
 waybeam's own AE loop, written against the kernel interfaces of the
@@ -219,7 +283,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.

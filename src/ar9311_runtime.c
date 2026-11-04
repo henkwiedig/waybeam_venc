@@ -4,6 +4,8 @@
 #include "ar9311_capture.h"
 #include "ar9311_encoder.h"
 #include "ar9311_iq.h"
+#include "ar9311_merge.h"
+#include "ar9311_strips.h"
 #include "ar9311_picture.h"
 #include "ar9311_validation.h"
 #include "h26x_param_sets.h"
@@ -30,6 +32,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/timerfd.h>
+#include <time.h>
 #include <unistd.h>
 
 #define AR9311_VENC_CHN 0
@@ -103,6 +107,34 @@ typedef struct {
 	 * published capture time where depth 2 puts it (just after the write)
 	 * and latency figures comparable. */
 	uint64_t pts_offset_us;
+
+	/* video0.strips (ar9311_strips.h): strip k of the frame on encoder
+	 * se[k] (se[0] is `encoder`), joined into one picture of N slices
+	 * (ar9311_merge.h) and published as N parts. */
+	int strips;                   /* 0, or the number of strips */
+	Ar9311Encoder strip_enc[AR9311_STRIPS_MAX - 1];
+	Ar9311Encoder *se[AR9311_STRIPS_MAX];
+	Ar9311Merge merge;
+	Ar9311StripPlan plan;
+	struct {
+		int used, index, queued, reclaimed;
+		uint64_t ts;
+	} strip_frame[AR9311_CAPTURE_MAX_BUFS];
+	struct {
+		int have, slot;
+		const uint8_t *data;
+		size_t len;
+		uint64_t ts;
+	} strip_au[AR9311_STRIPS_MAX];
+	uint8_t *strip_buf;
+	size_t strip_cap;
+	int strip_idr_pending;
+	int strip_next;               /* next strip of the open frame, 0 = none */
+	uint64_t strip_cur_ts;
+	VencFrameMeta strip_meta;
+	uint64_t strip_merge_errors, strip_out_of_step, strip_abandoned;
+	uint64_t strip_t_first_sum, strip_t_whole_sum, strip_t_n;
+	uint64_t strip_last_report_us;
 } Ar9311RunnerContext;
 
 /* The shared VencApplyCallbacks ABI carries no opaque pointer, so like every
@@ -135,8 +167,24 @@ static int ar9311_apply_bitrate(uint32_t kbps)
 {
 	Ar9311RunnerContext *ctx = g_ar9311_runner;
 
-	if (!ctx || ar9311_encoder_set_bitrate(&ctx->encoder, kbps) != 0)
+	if (!ctx)
 		return -1;
+	if (ctx->strips) {
+		uint32_t left = kbps;
+		int k;
+
+		for (k = 0; k < ctx->strips; k++) {
+			uint32_t r = k == ctx->strips - 1 ? left :
+				(uint32_t)((uint64_t)kbps * ctx->plan.height[k] /
+					AR9311_HEIGHT);
+
+			left -= r;
+			if (ar9311_encoder_set_bitrate(ctx->se[k], r) != 0)
+				return -1;
+		}
+	} else if (ar9311_encoder_set_bitrate(&ctx->encoder, kbps) != 0) {
+		return -1;
+	}
 	__atomic_store_n(&ctx->live_bitrate, kbps, __ATOMIC_RELEASE);
 	return 0;
 }
@@ -164,6 +212,13 @@ static int ar9311_request_idr(void)
 		return -1;
 	if (!idr_rate_limit_allow(AR9311_VENC_CHN))
 		return 0;
+	if (g_ar9311_runner->strips) {
+		/* both strips must turn IDR on the same frame: the loop asks
+		 * both encoders right before it queues a top strip */
+		__atomic_store_n(&g_ar9311_runner->strip_idr_pending, 1,
+			__ATOMIC_RELEASE);
+		return 0;
+	}
 	return ar9311_encoder_request_idr(&g_ar9311_runner->encoder);
 }
 
@@ -751,6 +806,9 @@ static int ar9311_prepare(void *opaque)
 	ctx->max_payload_size = ctx->config.outgoing.max_payload_size;
 	ctx->verbose = ctx->config.system.verbose ? 1 : 0;
 	printf("> AR9311 backend selected (V4L2 camera + wave5, first slice)\n");
+	/* 0 and 1 are both one picture */
+	ctx->strips = ctx->config.video0.strips >= 2 ?
+		(int)ctx->config.video0.strips : 0;
 	return 0;
 }
 
@@ -832,6 +890,439 @@ static void ar9311_plan_sfs(Ar9311RunnerContext *ctx,
 		AR9311_SFS_BAND_LINES);
 }
 
+
+/* ── Strips (video0.strips, ar9311_strips.h) ──────────────────────────── */
+
+/* Where the camera's last line lands after its timestamp at depth 1
+ * (measured, see AR9311_SFS_*), to report part times against. */
+#define AR9311_STRIP_LAST_LINE_US 15962u
+
+static int ar9311_strips_start(Ar9311RunnerContext *ctx,
+	const Ar9311EncoderParams *params)
+{
+	uint32_t left = params->bitrate_kbps;
+	int n = ctx->strips, k;
+
+	/* Without sub-frame sync the camera hands a frame back only once it
+	 * is written, so nothing would overlap; the strips' parts also need
+	 * the frame-shm ring (an RTP sender publishes whole units). */
+	if (!params->sfs_row_us || ar9311_capture_depth() != 1 ||
+	    ctx->output_uri.type != VENC_OUTPUT_URI_FRAME_SHM ||
+	    ar9311_strips_plan(n, AR9311_HEIGHT, params->sfs_start_us,
+		params->sfs_row_us, &ctx->plan) != 0) {
+		fprintf(stderr, "WARNING: [ar9311] video0.strips needs sub-frame "
+			"sync (CVISP depth 1) and a frame-shm output; encoding "
+			"one picture\n");
+		ctx->strips = 0;
+		if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH,
+			AR9311_HEIGHT) != 0 ||
+		    ar9311_encoder_open(&ctx->encoder, &ctx->capture.geo,
+			ctx->capture.buf_count, params) != 0 ||
+		    ar9311_encoder_start(&ctx->encoder) != 0 ||
+		    ar9311_capture_start(&ctx->capture) != 0)
+			return -1;
+		return 0;
+	}
+	if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH, AR9311_HEIGHT) != 0)
+		return -1;
+	ctx->se[0] = &ctx->encoder;
+	for (k = 1; k < n; k++)
+		ctx->se[k] = &ctx->strip_enc[k - 1];
+	for (k = 0; k < n; k++) {
+		Ar9311EncoderParams p = *params;
+		Ar9311Geometry g = ctx->capture.geo;
+
+		g.height = ctx->plan.height[k];
+		/* each seam is a slice boundary the decoder must not filter
+		 * across: each encoder saw it as its picture's edge */
+		p.no_lf_across_slices = 1;
+		p.bitrate_kbps = k == n - 1 ? left :
+			(uint32_t)((uint64_t)params->bitrate_kbps *
+				ctx->plan.height[k] / AR9311_HEIGHT);
+		left -= p.bitrate_kbps;
+		if (k < n - 1) {
+			p.sfs_row_us = 0;
+			p.sfs_start_us = 0;
+		} else {
+			p.sfs_start_us = ctx->plan.sfs_start_us;
+		}
+		if (ar9311_encoder_open(ctx->se[k], &g, ctx->capture.buf_count,
+			&p) != 0)
+			return -1;
+		printf("> [ar9311] strip %d: lines %u..%u, %u kbps, %s %+d us\n", k,
+			ctx->plan.y0[k], ctx->plan.y0[k] + ctx->plan.height[k] - 1,
+			p.bitrate_kbps, k < n - 1 ? "queued at" : "sub-frame sync from",
+			k < n - 1 ? (int)ctx->plan.due_us[k] : (int)p.sfs_start_us);
+	}
+	ar9311_merge_init(&ctx->merge, n, ctx->plan.height);
+	ctx->strip_cap = 1u << 20;
+	ctx->strip_buf = malloc(ctx->strip_cap);
+	if (!ctx->strip_buf)
+		return -1;
+	for (k = 0; k < n; k++)
+		if (ar9311_encoder_start(ctx->se[k]) != 0)
+			return -1;
+	return ar9311_capture_start(&ctx->capture) != 0 ? -1 : 0;
+}
+
+/* Part @p k of the open frame onto the ring: all but the last flagged
+ * partial, all with the first part's metadata. */
+static void ar9311_strips_publish(Ar9311RunnerContext *ctx, int k,
+	const uint8_t *data, size_t len, uint64_t capture_us)
+{
+	int last = k == ctx->strips - 1;
+	VencFrameMeta meta;
+	const uint8_t *out = data;
+	size_t out_len = len;
+
+	if (k == 0) {
+		int head;
+
+		memset(&meta, 0, sizeof(meta));
+		meta.pts = (uint32_t)capture_us;
+		meta.codec = VENC_FRAME_CODEC_H265;
+		head = ar9311_gdr_step(ctx, ar9311_scan_frame(ctx, data, len),
+			&meta);
+		ctx->strip_meta = meta;
+		if (head) {
+			const uint8_t *with = ar9311_with_param_sets(ctx, data, len,
+				&out_len);
+
+			if (with)
+				out = with;
+			else
+				out_len = len;
+		}
+	} else {
+		meta = ctx->strip_meta;
+	}
+	if (!last)
+		meta.flags |= VENC_FRAME_FLAG_PARTIAL;
+	ar9311_transport_begin_frame(ctx);
+	if (ctx->tx.output_enabled && ctx->frame_ring &&
+	    venc_frame_ring_write(ctx->frame_ring, &meta, out,
+		(uint32_t)out_len) != 0)
+		__atomic_add_fetch(&ctx->output_drops, 1, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&ctx->bytes, len, __ATOMIC_RELAXED);
+	if (!last)
+		return;
+	ar9311_observe_transport(ctx);
+	__atomic_add_fetch(&ctx->frames, 1, __ATOMIC_RELAXED);
+	pipeline_common_rate_watch(&ctx->rate_watch, &ctx->config,
+		(uint32_t)len, wb_monotonic_us());
+}
+
+static int ar9311_strips_grow(Ar9311RunnerContext *ctx, size_t len)
+{
+	uint8_t *p;
+
+	if (len + 4096 <= ctx->strip_cap)
+		return 0;
+	p = realloc(ctx->strip_buf, len + 4096);
+	if (!p)
+		return -1;
+	ctx->strip_buf = p;
+	ctx->strip_cap = len + 4096;
+	return 0;
+}
+
+/* Give up the open frame (its published parts end incomplete: the
+ * consumer drops them when the next pts arrives) and ask for an IDR. */
+static void ar9311_strips_fail(Ar9311RunnerContext *ctx, uint64_t *counter,
+	const char *what)
+{
+	if ((*counter)++ < 10 || *counter % 600 == 0)
+		fprintf(stderr, "WARN: [ar9311] strips: %s (#%llu)\n", what,
+			(unsigned long long)*counter);
+	ctx->strip_next = 0;
+	__atomic_store_n(&ctx->strip_idr_pending, 1, __ATOMIC_RELEASE);
+}
+
+static int ar9311_strips_take(Ar9311RunnerContext *ctx, int k,
+	const uint8_t *data, size_t len, uint64_t ts)
+{
+	int last = k == ctx->strips - 1;
+	uint64_t now;
+	size_t n;
+
+	if (k == 0) {
+		if (ctx->strip_next != 0)
+			ctx->strip_abandoned++;	/* the open frame lost its end */
+		ctx->strip_next = 0;
+	} else if (ctx->strip_next != k || ts != ctx->strip_cur_ts) {
+		if (ctx->strip_next != 0)
+			ctx->strip_abandoned++;
+		ctx->strip_next = 0;	/* the rest of a given-up frame */
+		return 0;
+	}
+	if (!len) {
+		ar9311_strips_fail(ctx, &ctx->strip_merge_errors,
+			"encoder returned an empty strip");
+		return 0;
+	}
+	if (ar9311_strips_grow(ctx, len) != 0)
+		return -1;
+	n = ar9311_merge_strip(&ctx->merge, k, data, len, ctx->strip_buf,
+		ctx->strip_cap);
+	if (!n) {
+		ar9311_strips_fail(ctx, &ctx->strip_merge_errors, ctx->merge.error);
+		return 0;
+	}
+	if (last && !ar9311_merge_in_step(&ctx->merge)) {
+		ar9311_strips_fail(ctx, &ctx->strip_out_of_step,
+			"strips out of step");
+		return 0;
+	}
+	ar9311_strips_publish(ctx, k, ctx->strip_buf, n,
+		ts + ctx->pts_offset_us);
+	now = wb_monotonic_us();
+	if (k == 0) {
+		ctx->strip_cur_ts = ts;
+		ctx->strip_t_first_sum += now - ts;
+	}
+	ctx->strip_next = k + 1;
+	if (last) {
+		ctx->strip_t_whole_sum += now - ts;
+		ctx->strip_t_n++;
+		ctx->last_frame_us = now;
+		ctx->strip_next = 0;
+	}
+	return 0;
+}
+
+/* Every finished strip, in frame order: one access unit is held per
+ * encoder and the oldest (frame, then strip) goes first. */
+static int ar9311_strips_drain(Ar9311RunnerContext *ctx)
+{
+	for (;;) {
+		int k, pick = -1;
+
+		for (k = 0; k < ctx->strips; k++) {
+			if (!ctx->strip_au[k].have) {
+				int r = ar9311_encoder_dequeue_stream(ctx->se[k],
+					&ctx->strip_au[k].slot, &ctx->strip_au[k].data,
+					&ctx->strip_au[k].len, &ctx->strip_au[k].ts);
+
+				if (r < 0)
+					return -1;
+				ctx->strip_au[k].have = r == 0;
+			}
+			if (ctx->strip_au[k].have && (pick < 0 ||
+			    ctx->strip_au[k].ts < ctx->strip_au[pick].ts))
+				pick = k;
+		}
+		if (pick < 0)
+			return 0;
+		if (ar9311_strips_take(ctx, pick, ctx->strip_au[pick].data,
+			ctx->strip_au[pick].len, ctx->strip_au[pick].ts) != 0)
+			return -1;
+		ctx->strip_au[pick].have = 0;
+		if (ar9311_encoder_release_stream(ctx->se[pick],
+			ctx->strip_au[pick].slot) != 0)
+			return -1;
+	}
+}
+
+static int ar9311_strips_reclaim(Ar9311RunnerContext *ctx)
+{
+	int k, index, ret;
+
+	for (k = 0; k < ctx->strips; k++) {
+		while ((ret = ar9311_encoder_reclaim_source(ctx->se[k], &index))
+			== 0) {
+			if (index < 0 || index >= AR9311_CAPTURE_MAX_BUFS)
+				continue;
+			if (++ctx->strip_frame[index].reclaimed < ctx->strips)
+				continue;
+			ctx->strip_frame[index].used = 0;
+			ctx->held--;
+			if (ar9311_capture_requeue(&ctx->capture, index) != 0)
+				return -1;
+		}
+		if (ret < 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ar9311_strips_feed(Ar9311RunnerContext *ctx)
+{
+	uint64_t ts;
+	int index, corrupt, ret;
+
+	while ((ret = ar9311_capture_dequeue(&ctx->capture, &index, &corrupt,
+		&ts)) == 0) {
+		if (corrupt || ctx->held >= ctx->capture.max_held ||
+		    index >= AR9311_CAPTURE_MAX_BUFS) {
+			__atomic_add_fetch(&ctx->camera_skips, 1, __ATOMIC_RELAXED);
+			if (ar9311_capture_requeue(&ctx->capture, index) != 0)
+				return -1;
+			continue;
+		}
+		memset(&ctx->strip_frame[index], 0, sizeof(ctx->strip_frame[0]));
+		ctx->strip_frame[index].used = 1;
+		ctx->strip_frame[index].index = index;
+		ctx->strip_frame[index].ts = ts;
+		ctx->held++;
+	}
+	return ret < 0 ? -1 : 0;
+}
+
+/* Queue every strip that is due, oldest frame first; *next gets the next
+ * due time (0 = nothing waiting). */
+static int ar9311_strips_issue(Ar9311RunnerContext *ctx, uint64_t now,
+	uint64_t *next)
+{
+	*next = 0;
+	for (;;) {
+		int i, k, pick = -1;
+
+		for (i = 0; i < AR9311_CAPTURE_MAX_BUFS; i++)
+			if (ctx->strip_frame[i].used &&
+			    ctx->strip_frame[i].queued < ctx->strips &&
+			    (pick < 0 || ctx->strip_frame[i].ts <
+				ctx->strip_frame[pick].ts))
+				pick = i;
+		if (pick < 0)
+			return 0;
+		while ((k = ctx->strip_frame[pick].queued) < ctx->strips) {
+			uint64_t due = ctx->plan.due_us[k] ?
+				ctx->strip_frame[pick].ts + ctx->plan.due_us[k] : 0;
+
+			if (due && now < due) {
+				*next = due;
+				return 0;
+			}
+			/* every strip turns IDR on the same frame */
+			if (k == 0 && __atomic_exchange_n(&ctx->strip_idr_pending, 0,
+				__ATOMIC_ACQ_REL)) {
+				for (i = 0; i < ctx->strips; i++)
+					if (ar9311_encoder_request_idr(ctx->se[i]) != 0)
+						fprintf(stderr, "WARN: [ar9311] strips: IDR "
+							"request failed\n");
+			}
+			if (ar9311_encoder_queue_source_rows(ctx->se[k], pick,
+				ctx->capture.dmabuf[pick], ctx->strip_frame[pick].ts,
+				ctx->plan.y0[k]) != 0)
+				return -1;
+			ctx->strip_frame[pick].queued++;
+		}
+	}
+}
+
+static void ar9311_strips_report(Ar9311RunnerContext *ctx, uint64_t now)
+{
+	if (now - ctx->strip_last_report_us < 10000000ull)
+		return;
+	if (ctx->strip_last_report_us && ctx->strip_t_n)
+		printf("> [ar9311] strips: %llu pictures in 10 s, first part ready "
+			"%+.2f ms, whole picture %+.2f ms after the camera's last "
+			"line (avg); merge errors %llu, out of step %llu, "
+			"abandoned %llu\n",
+			(unsigned long long)ctx->strip_t_n,
+			(double)ctx->strip_t_first_sum / (double)ctx->strip_t_n /
+				1000.0 - AR9311_STRIP_LAST_LINE_US / 1000.0,
+			(double)ctx->strip_t_whole_sum / (double)ctx->strip_t_n /
+				1000.0 - AR9311_STRIP_LAST_LINE_US / 1000.0,
+			(unsigned long long)ctx->strip_merge_errors,
+			(unsigned long long)ctx->strip_out_of_step,
+			(unsigned long long)ctx->strip_abandoned);
+	ctx->strip_t_first_sum = ctx->strip_t_whole_sum = ctx->strip_t_n = 0;
+	ctx->strip_last_report_us = now;
+}
+
+static int ar9311_run_strips(Ar9311RunnerContext *ctx)
+{
+	struct pollfd pfd[2 + AR9311_STRIPS_MAX];
+	int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	int rc = 0, k, nfd;
+
+	if (tfd < 0) {
+		perror("[ar9311] timerfd");
+		return -1;
+	}
+	ctx->last_frame_us = wb_monotonic_us();
+	while (!g_ar9311_stop) {
+		struct itimerspec its;
+		uint64_t now = wb_monotonic_us(), next;
+		uint64_t expirations;
+
+		if (venc_api_get_reinit()) {
+			venc_api_clear_reinit();
+			venc_respawn_request();
+			break;
+		}
+		if (ar9311_strips_issue(ctx, now, &next) != 0) {
+			rc = -1;
+			break;
+		}
+		memset(&its, 0, sizeof(its));
+		if (next) {
+			its.it_value.tv_sec = (time_t)(next / 1000000u);
+			its.it_value.tv_nsec = (long)(next % 1000000u) * 1000;
+		}
+		(void)timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, NULL);
+		nfd = 0;
+		pfd[nfd].fd = ctx->capture.fd;
+		pfd[nfd++].events = POLLIN;
+		pfd[nfd].fd = tfd;
+		pfd[nfd++].events = POLLIN;
+		for (k = 0; k < ctx->strips; k++) {
+			pfd[nfd].fd = ctx->se[k]->fd;
+			pfd[nfd++].events = POLLIN | POLLOUT;
+		}
+		if (poll(pfd, (nfds_t)nfd, 1000) < 0) {
+			if (errno == EINTR)
+				continue;
+			rc = -1;
+			break;
+		}
+		(void)!read(tfd, &expirations, sizeof(expirations));
+		if (ar9311_strips_drain(ctx) != 0 ||
+		    ar9311_strips_reclaim(ctx) != 0 ||
+		    ar9311_strips_feed(ctx) != 0) {
+			rc = -1;
+			break;
+		}
+		now = wb_monotonic_us();
+		ar9311_strips_report(ctx, now);
+		if (now - ctx->last_frame_us > AR9311_STALL_MS * 1000ull) {
+			fprintf(stderr, "ERROR: [ar9311] no encoded frame for %d ms: "
+				"camera or encoder stalled\n", AR9311_STALL_MS);
+			rc = -1;
+			break;
+		}
+	}
+	close(tfd);
+	return rc;
+}
+
+static void ar9311_strips_teardown(Ar9311RunnerContext *ctx)
+{
+	int i, k;
+
+	for (i = 0; i < 10 && ctx->held > 0; i++) {
+		struct pollfd pfd[AR9311_STRIPS_MAX];
+
+		for (k = 0; k < ctx->strips; k++) {
+			pfd[k].fd = ctx->se[k]->fd;
+			pfd[k].events = POLLIN | POLLOUT;
+		}
+		if (poll(pfd, (nfds_t)ctx->strips, 50) <= 0)
+			continue;
+		if (ar9311_strips_drain(ctx) != 0 ||
+		    ar9311_strips_reclaim(ctx) != 0)
+			break;
+	}
+	if (ctx->held > 0)
+		fprintf(stderr, "WARN: [ar9311] strips: %d frame(s) still held at "
+			"shutdown\n", ctx->held);
+	for (k = 0; k < ctx->strips; k++)
+		if (ctx->strip_au[k].have)
+			(void)ar9311_encoder_release_stream(ctx->se[k],
+				ctx->strip_au[k].slot);
+}
+
 static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 {
 	Ar9311EncoderParams params;
@@ -847,6 +1338,8 @@ static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 	params.flip = ctx->config.image.flip;
 	ar9311_plan_refresh(ctx, &params);
 	ar9311_plan_sfs(ctx, &params);
+	if (ctx->strips)
+		return ar9311_strips_start(ctx, &params);
 	if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH, AR9311_HEIGHT) != 0)
 		return -1;
 	if (ar9311_encoder_open(&ctx->encoder, &ctx->capture.geo,
@@ -964,6 +1457,8 @@ static int ar9311_run(void *opaque)
 	Ar9311RunnerContext *ctx = opaque;
 	struct pollfd pfd[2];
 
+	if (ctx->strips)
+		return ar9311_run_strips(ctx);
 	ctx->last_frame_us = wb_monotonic_us();
 	while (!g_ar9311_stop) {
 		int ready;
@@ -1034,12 +1529,23 @@ static void ar9311_teardown(void *opaque)
 	/* Before the camera stops: the thread reads its statistics. */
 	ar9311_ae_stop(ctx->ae);
 	ctx->ae = NULL;
-	if (ctx->encoder.streaming)
+	if (ctx->strips && ctx->encoder.streaming)
+		ar9311_strips_teardown(ctx);
+	else if (ctx->encoder.streaming)
 		ar9311_drain_encoder(ctx);
 	ar9311_output_stop(ctx);
 	/* Camera first: it stops writing the buffers the encoder imported. */
 	ar9311_capture_close(&ctx->capture);
 	ar9311_encoder_close(&ctx->encoder);
+	{
+		int k;
+
+		for (k = 0; k < AR9311_STRIPS_MAX - 1; k++)
+			ar9311_encoder_close(&ctx->strip_enc[k]);
+	}
+	ar9311_merge_free(&ctx->merge);
+	free(ctx->strip_buf);
+	ctx->strip_buf = NULL;
 	free(ctx->wave_buf);
 	ctx->wave_buf = NULL;
 	ctx->wave_buf_len = 0;

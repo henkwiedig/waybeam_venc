@@ -98,6 +98,8 @@ typedef struct {
 	int flip;              /* upside down; both = rotated 180 degrees */
 	int32_t sfs_start_us;  /* sub-frame sync schedule (see above) */
 	uint32_t sfs_row_us;   /* 0 = sub-frame sync off */
+	int no_lf_across_slices; /* deblocking/SAO stop at slice boundaries
+	                          * (video0.strips: each seam is one) */
 } Ar9311EncoderParams;
 
 typedef struct {
@@ -129,6 +131,11 @@ int ar9311_encoder_start(Ar9311Encoder *enc);
  *  @p timestamp_us travels with the frame to its access unit. */
 int ar9311_encoder_queue_source(Ar9311Encoder *enc, int index, const int *fds,
 	uint64_t timestamp_us);
+
+/** The same, starting @p first_row lines into the camera buffer, for a
+ *  strip encoder whose own height is the strip's (video0.strips). */
+int ar9311_encoder_queue_source_rows(Ar9311Encoder *enc, int index,
+	const int *fds, uint64_t timestamp_us, uint32_t first_row);
 
 /** Take back a source buffer the encoder has finished reading.  Returns 0
  *  with *index set, 1 when none is done, -1 on error. */

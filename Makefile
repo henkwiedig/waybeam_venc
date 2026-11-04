@@ -113,7 +113,7 @@ CV610_SRC := src/main.c src/backend_cv610.c src/cv610_runtime.c \
 	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
 	src/device_id.c src/venc_respawn.c
 AR9311_SRC := src/main.c src/backend_ar9311.c src/ar9311_runtime.c \
-	src/ar9311_capture.c src/ar9311_encoder.c src/ar9311_validation.c \
+	src/ar9311_capture.c src/ar9311_encoder.c src/ar9311_merge.c src/ar9311_validation.c \
 	src/ar9311_v4l2.c src/ar9311_ae.c src/ar9311_picture.c src/ar9311_iq.c \
 	src/backend.c \
 	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
@@ -518,6 +518,7 @@ CV610_VALIDATION_TEST := tests/test_cv610_validation
 AR9311_VALIDATION_TEST := tests/test_ar9311_validation
 AR9311_AE_TEST := tests/test_ar9311_ae
 AR9311_IQ_TEST := tests/test_ar9311_iq
+AR9311_MERGE_TEST := tests/test_ar9311_merge
 TEST_SRCS    := tests/test_runner.c tests/test_venc_config.c \
                 tests/test_venc_api.c tests/test_venc_httpd.c \
                 tests/test_sensor_select.c tests/test_venc_ring.c \
@@ -572,6 +573,11 @@ $(AR9311_VALIDATION_TEST): tests/test_ar9311_validation.c \
 		src/intra_refresh.c src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -ldl -lm -o $@
 
+$(AR9311_MERGE_TEST): tests/test_ar9311_merge.c src/ar9311_merge.c \
+		include/ar9311_merge.h include/ar9311_strips.h \
+		tests/ar9311_merge_fixture.h
+	$(HOST_CC) $(HOST_CFLAGS) -Werror tests/test_ar9311_merge.c -o $@
+
 $(AR9311_AE_TEST): tests/test_ar9311_ae.c src/ar9311_ae.c include/ar9311_ae.h
 	$(HOST_CC) $(HOST_CFLAGS) -Werror tests/test_ar9311_ae.c src/ar9311_ae.c \
 		-lpthread -lm -o $@
@@ -582,21 +588,23 @@ $(AR9311_IQ_TEST): tests/test_ar9311_iq.c src/ar9311_iq.c src/ar9311_ae.c \
 		src/ar9311_ae.c lib/cJSON.c -lpthread -lm -o $@
 
 test: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST) \
-		$(AR9311_AE_TEST) $(AR9311_IQ_TEST)
+		$(AR9311_AE_TEST) $(AR9311_IQ_TEST) $(AR9311_MERGE_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
 	./$(AR9311_VALIDATION_TEST)
 	./$(AR9311_AE_TEST)
 	./$(AR9311_IQ_TEST)
+	./$(AR9311_MERGE_TEST)
 
 test-werror: HOST_CFLAGS += -Werror
 test-werror: $(TEST_RUNNER) $(CV610_VALIDATION_TEST) $(AR9311_VALIDATION_TEST) \
-		$(AR9311_AE_TEST) $(AR9311_IQ_TEST)
+		$(AR9311_AE_TEST) $(AR9311_IQ_TEST) $(AR9311_MERGE_TEST)
 	./$(TEST_RUNNER)
 	./$(CV610_VALIDATION_TEST)
 	./$(AR9311_VALIDATION_TEST)
 	./$(AR9311_AE_TEST)
 	./$(AR9311_IQ_TEST)
+	./$(AR9311_MERGE_TEST)
 
 test-asan:
 	$(HOST_CC) $(HOST_CFLAGS) -Werror -fsanitize=address,undefined $(TEST_SRCS) $(TEST_LIB_SRCS) -lpthread -ldl -lm -o $(TEST_RUNNER)
@@ -847,7 +855,7 @@ clean:
 	rm -f $(TEST_RUNNER)
 	rm -f $(CV610_VALIDATION_TEST)
 	rm -f $(AR9311_VALIDATION_TEST)
-	rm -f $(AR9311_AE_TEST) $(AR9311_IQ_TEST)
+	rm -f $(AR9311_AE_TEST) $(AR9311_IQ_TEST) $(AR9311_MERGE_TEST)
 	rm -f $(QR_TEST_RUNNER)
 	rm -f $(QR_HOST_DECODE)
 	rm -f .build_soc

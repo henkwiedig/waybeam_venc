@@ -70,6 +70,7 @@ extern "C" {
  * warnings).  The old cap made 9 and 17 unreachable and capped the fleet at
  * 6, since 7 and 8 both quantize down to 6. */
 #define VENC_SLICE_COUNT_MAX 32
+#define VENC_STRIPS_MAX 4
 
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
@@ -165,6 +166,11 @@ typedef struct {
 	                            * frame while it is still being written,
 	                            * 64 lines at a time (CVISP depth 1 + wave5
 	                            * sub-frame sync). */
+	uint32_t strips;           /* AR9311: the frame encoded as this many
+	                            * horizontal strips, one picture of as many
+	                            * slices, each sent as soon as it is
+	                            * encoded; 0 (or 1) = one picture, else
+	                            * 2..VENC_STRIPS_MAX.  Needs sub_frame_sync. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

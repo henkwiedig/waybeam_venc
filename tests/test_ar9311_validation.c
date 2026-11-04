@@ -1,4 +1,5 @@
 #include "ar9311_encoder.h"
+#include "ar9311_strips.h"
 #include "ar9311_validation.h"
 #include "venc_api.h"
 #include "venc_config.h"
@@ -99,6 +100,14 @@ static int test_validation(void)
 	failures += expect_config("ar9311_reject_svc_preset", &cfg, 0);
 
 	valid_config(&cfg);
+	cfg.video0.strips = 4;
+	failures += expect_config("ar9311_accept_4_strips", &cfg, 1);
+
+	valid_config(&cfg);
+	cfg.video0.strips = 5;
+	failures += expect_config("ar9311_reject_5_strips", &cfg, 0);
+
+	valid_config(&cfg);
 	cfg.audio.enabled = true;
 	failures += expect_config("ar9311_reject_audio", &cfg, 0);
 
@@ -174,10 +183,46 @@ static int test_sfs_schedule(void)
 	return failures;
 }
 
+/* Strips on the depth-1 SFS schedule (band n released at 1458 + 948 n us):
+ * whole 64-line rows, the spare rows to the top, every strip but the last
+ * queued at its last band's release, the last one following the camera from
+ * its first band. */
+static int test_strips_plan(void)
+{
+	Ar9311StripPlan p;
+	int failures = 0;
+
+	failures += expect("ar9311_strips_2",
+		ar9311_strips_plan(2, 1080, 1458, 948, &p) == 0 &&
+		p.y0[0] == 0 && p.height[0] == 576 &&
+		p.y0[1] == 576 && p.height[1] == 504 &&
+		p.due_us[0] == 1458 + 948 * 8 && p.due_us[1] == 0 &&
+		p.sfs_start_us == 1458 + 948 * 9, NULL);
+	failures += expect("ar9311_strips_3",
+		ar9311_strips_plan(3, 1080, 1458, 948, &p) == 0 &&
+		p.height[0] == 384 && p.height[1] == 384 && p.height[2] == 312 &&
+		p.y0[2] == 768 && p.due_us[0] == 1458 + 948 * 5 &&
+		p.due_us[1] == 1458 + 948 * 11 &&
+		p.sfs_start_us == 1458 + 948 * 12, NULL);
+	failures += expect("ar9311_strips_4",
+		ar9311_strips_plan(4, 1080, 1458, 948, &p) == 0 &&
+		p.height[0] == 320 && p.height[1] == 256 && p.height[2] == 256 &&
+		p.height[3] == 248 && p.y0[3] == 832 &&
+		p.due_us[0] == 5250 && p.due_us[1] == 9042 &&
+		p.due_us[2] == 12834 && p.sfs_start_us == 13782, NULL);
+	failures += expect("ar9311_strips_reject_1",
+		ar9311_strips_plan(1, 1080, 1458, 948, &p) != 0, NULL);
+	failures += expect("ar9311_strips_reject_5",
+		ar9311_strips_plan(5, 1080, 1458, 948, &p) != 0, NULL);
+	failures += expect("ar9311_strips_reject_too_few_rows",
+		ar9311_strips_plan(4, 128, 1458, 948, &p) != 0, NULL);
+	return failures;
+}
+
 int main(void)
 {
 	int failures = test_validation() + test_mutability() +
-		test_refresh_plan() + test_sfs_schedule();
+		test_refresh_plan() + test_sfs_schedule() + test_strips_plan();
 
 	printf("ar9311 validation: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

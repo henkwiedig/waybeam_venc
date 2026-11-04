@@ -1,10 +1,14 @@
 #include "ar9311_validation.h"
 
 #include "ar9311_encoder.h"
+#include "ar9311_strips.h"
 #include "pipeline_common.h"
 
 #include <math.h>
 #include <string.h>
+
+_Static_assert(AR9311_STRIPS_MAX == VENC_STRIPS_MAX,
+	"the API bound on video0.strips is the AR9311 one");
 
 static const char *validate_video(const VencConfig *cfg)
 {
@@ -38,6 +42,8 @@ static const char *validate_video(const VencConfig *cfg)
 		return "AR9311 phase one supports video0.framing=off only";
 	if (v->slice_count > 1)
 		return "AR9311 phase one supports video0.slice_count=1 only";
+	if (v->strips > AR9311_STRIPS_MAX)
+		return "AR9311 video0.strips must be 0..4";
 	return NULL;
 }
 

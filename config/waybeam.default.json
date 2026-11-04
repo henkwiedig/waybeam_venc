@@ -43,6 +43,7 @@
     "sliceCount": 1,
     "sliceOutput": false,
     "subFrameSync": false,
+    "strips": 0,
     "resilience": "off",
     "intraRefreshQp": 0,
     "zoomX": 0.5,

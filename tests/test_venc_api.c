@@ -499,6 +499,16 @@ static int test_field_support_by_backend(void)
 	CHECK("sub_frame_sync unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.sub_frame_sync") == 0);
+	/* Strips are AR9311's too. */
+	CHECK("strips supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
+			"video0.strips") == 1);
+	CHECK("strips unsupported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.strips") == 0);
+	CHECK("strips unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.strips") == 0);
 
 	CHECK("scene_threshold supported star6e",
 		venc_api_field_supported_for_backend("star6e",

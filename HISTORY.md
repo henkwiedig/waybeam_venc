@@ -1,5 +1,40 @@
 # History
 
+## [0.94.0] - 2026-11-04
+
+AR9311: **strips, ~10 ms less displayed latency.**  `contract_version`
+moves to **0.38.0**.  New `video0.strips` (uint 0..4, restart, AR9311 only;
+2 in the AR9311 default config, 0 or 1 = one picture): the frame is encoded
+as N horizontal strips on N wave5 instances and joined into one H.265
+picture with N slices, published on frame-shm slice by slice.
+
+- The AR9311 has one H.26x core, so the strips are not encoded in parallel
+  (two strips take 8.1 ms against 7.1 ms for the frame).  They overlap with
+  the camera and the link instead, as in the vendor's low-delay "pattern"
+  mode: a strip is queued once the camera has written its last line
+  (`ar9311_strips_plan()`: whole 64-line rows, the last strip the smallest,
+  queued at its last band's release in the sub-frame sync schedule), the
+  last strip follows the camera with sub-frame sync, and every strip's
+  slice goes onto the ring as soon as it is encoded
+  (`VENC_FRAME_FLAG_PARTIAL`), so `ar8030-transport-tx` sends the top of the
+  picture while the rest is encoded.  Needs sub-frame sync and a frame-shm
+  output, else one picture with a warning.
+- `ar9311_merge.c` joins the access units: strip 0's SPS gets the full
+  height, the other strips' parameter sets are checked against strip 0's
+  and dropped, and their slice headers get the picture's CTU address.  The
+  encoders run with the loop filter off at slice boundaries.  A frame whose
+  strips do not join is given up and every encoder is asked for an IDR;
+  IDR requests reach all encoders before a frame's first strip.  Host test
+  `tests/test_ar9311_merge` (real wave5 headers from a P1, 2 and 3 strips).
+- The seams are not bit-exact (motion vectors at a strip's edge read the
+  encoder's padding, the decoder the neighbour's pixels): up to ~0.1 % of
+  the pixels, within 40 lines of a seam, until the intra refresh passes.
+- Measured on a P1 -> VRX Pro at ~22 Mbit/s: capture -> ground receiver
+  28.7 -> 23.4 / 20.4 / 18.9 ms with 2 / 3 / 4 strips, the vsync-lock
+  target 47.8 -> 37.5 / 38.0 / 35.6 ms, drops per 10 s 3.2 -> 2.2 / 4.4 /
+  5.2; every part costs the radio's write path ~1.5 ms, hence 2 as the
+  default.
+
 ## [0.93.0] - 2026-11-04
 
 AR9311: **sub-frame sync, ~6 ms less air latency.**  `contract_version`

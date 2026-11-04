@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.37.0`
+- `contract_version`: `0.38.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -47,6 +47,7 @@
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `isp.antiFlickerHz` | **false** | **false** | **false** (AR9311 only, **from 0.35.0**) |
 | `video0.subFrameSync` | **false** | **false** | **false** (AR9311 only, **from 0.37.0**) |
+| `video0.strips` | **false** | **false** | **false** (AR9311 only, **from 0.38.0**) |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 | `outgoing.server` that cannot be brought up | inert output, craft runs (**from 0.82.0**) | same | same |
 
@@ -113,8 +114,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.93.0",
-    "contract_version": "0.37.0",
+    "app_version": "0.94.0",
+    "contract_version": "0.38.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -331,6 +332,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`, `video0.subFrameSync`,
+`video0.strips`,
 `video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
@@ -763,6 +765,16 @@ curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
 - Needs the OpenIPC builder's P1 kernel patches `0004-media-wave5-sub-frame-sync` (the `V4L2_CID_WAVE5_SFS_START_US` / `_ROW_US` encoder controls) and `0005-media-artosyn-cvisp-depth-per-stream` (a writable CVISP `depth`). Without either it logs a warning and runs off. Off runs the CVISP at depth 2.
 - The frame-SHM `pts` stays the moment the frame is complete in memory (+0.9 ms), as without sub-frame sync: at depth 1 the camera timestamp marks the start of the write, so one frame period is added before it is published.
 - **Measured** on a P1 (NT99235 1080p60, ~22 Mbit/s, PI rate control) with `ar8030-transport-tx`: capture -> write start 8.8-9.4 ms -> 2.5-3.0 ms; 60 fps, 0 camera skips.
+- `supported:false` on Star6E, Maruko and CV610.
+
+### `video0.strips` (AR9311) — Strips
+
+`video0.strips` (uint, `0`..`4`, default `0`; `2` in the AR9311 default config; restart-required, persisted) encodes the frame as that many horizontal strips, one wave5 instance each, joined into one H.265 picture with as many slices. `0` and `1` encode one picture. Each strip is queued as soon as the camera has written it, the last one with sub-frame sync, and each strip's slice is published on frame-SHM as soon as it is encoded (`VENC_FRAME_FLAG_PARTIAL` until the last, as with CV610 `video0.sliceOutput`), so the link carries the top of the picture while the rest is still being encoded. The AR9311 has one H.26x core: strips are encoded one after the other, the gain is the overlap with the camera and the link.
+
+- Needs `video0.subFrameSync` in effect (the builder's wave5 and CVISP kernel patches) and a `frame-shm://` output; otherwise it logs a warning and encodes one picture.
+- Strips are whole 64-line CTU rows (2: 576 + 504 lines, 3: 384/384/312, 4: 320/256/256/248). The seams are slice boundaries the decoder does not filter across; they are not bit-exact (a motion vector at a strip's edge reads the encoder's padding, the decoder the neighbour's pixels): up to ~0.1 % of the pixels near the seams differ until the intra refresh passes them again.
+- A frame whose strips do not join (different POC or IDR-ness, a parameter set that differs) is given up and every strip encoder is asked for an IDR.
+- **Measured** on a P1 -> VRX Pro at ~22 Mbit/s: capture -> ground receiver 28.7 ms (one picture) -> 23.4 / 20.4 / 18.9 ms (2 / 3 / 4 strips); the ground's vsync-lock target 47.8 -> 37.5 / 38.0 / 35.6 ms; drops per 10 s 3.2 -> 2.2 / 4.4 / 5.2. Each part costs ~1.5 ms in the radio's write path.
 - `supported:false` on Star6E, Maruko and CV610.
 
 ### `GET /api/v1/restart`
@@ -2044,6 +2056,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.38.0` (additive — strips on AR9311): adds `video0.strips`, uint `0`..`4`, default `0` (`2` in the AR9311 default config), restart-required, persisted. The frame is encoded as N strips on N wave5 instances, joined into one picture of N slices and published on frame-SHM slice by slice (`VENC_FRAME_FLAG_PARTIAL`); needs sub-frame sync and a frame-SHM output, else one picture with a warning. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".
 - `0.37.0` (additive — sub-frame sync on AR9311): adds `video0.subFrameSync` (`video0.sub_frame_sync`), bool, default `false` (`true` in the AR9311 default config), restart-required, persisted. The wave5 encoder takes each camera frame while it is written (CVISP depth 1, rows released from the frame's timestamp); needs the builder's wave5 and CVISP kernel patches, else it stays off with a warning. The frame-SHM `pts` keeps its meaning. `supported:false` on Star6E, Maruko and CV610. See "`video0.subFrameSync` (AR9311) — Sub-Frame Sync".
 - `0.36.1` (correction — AR9311 intra-refresh rows):
     On AR9311, `GET /api/v1/intra/status` `total_rows` and `lines.effective`

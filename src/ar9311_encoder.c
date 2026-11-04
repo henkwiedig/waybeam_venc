@@ -162,6 +162,11 @@ static int set_rate_control(int fd, const Ar9311EncoderParams *params)
 	if ((params->mirror && set_ctrl(fd, V4L2_CID_HFLIP, 1, "hflip") != 0) ||
 	    (params->flip && set_ctrl(fd, V4L2_CID_VFLIP, 1, "vflip") != 0))
 		return -1;
+	if (params->no_lf_across_slices &&
+	    set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
+		V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY,
+		"loop_filter_mode") != 0)
+		return -1;
 	if (params->min_qp && set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
 		(int32_t)params->min_qp, "min_qp") != 0)
 		return -1;
@@ -391,6 +396,15 @@ int ar9311_encoder_start(Ar9311Encoder *enc)
 int ar9311_encoder_queue_source(Ar9311Encoder *enc, int index, const int *fds,
 	uint64_t timestamp_us)
 {
+	return ar9311_encoder_queue_source_rows(enc, index, fds, timestamp_us, 0);
+}
+
+/* data_offset places the strip inside the imported camera planes (the
+ * driver adds it to each plane's DMA address); 4:2:0 chroma starts half as
+ * many rows in. */
+int ar9311_encoder_queue_source_rows(Ar9311Encoder *enc, int index,
+	const int *fds, uint64_t timestamp_us, uint32_t first_row)
+{
 	struct v4l2_buffer buf;
 	struct v4l2_plane planes[AR9311_CAPTURE_MAX_PLANES];
 	uint32_t i;
@@ -409,6 +423,8 @@ int ar9311_encoder_queue_source(Ar9311Encoder *enc, int index, const int *fds,
 		planes[i].m.fd = fds[i];
 		planes[i].length = enc->src.sizeimage[i];
 		planes[i].bytesused = enc->src.sizeimage[i];
+		planes[i].data_offset = (i ? first_row / 2 : first_row) *
+			enc->src.bytesperline[i];
 	}
 	if (ioctl(enc->fd, VIDIOC_QBUF, &buf) != 0) {
 		perror("[ar9311] QBUF encoder source");
