@@ -157,10 +157,27 @@ static int test_refresh_plan(void)
 	return failures;
 }
 
+/* Depth 1: band 0 (lines 0-63) is in memory 948 us after the timestamp,
+ * plus 110 us of chroma and a 400 us margin; depth 2 hands the buffer back a
+ * frame later, written, so every band is already due. */
+static int test_sfs_schedule(void)
+{
+	int32_t start;
+	uint32_t row;
+	int failures = 0;
+
+	ar9311_encoder_sfs_schedule(1, 60, &start, &row);
+	failures += expect("ar9311_sfs_depth1", start == 1458 && row == 948, NULL);
+	ar9311_encoder_sfs_schedule(2, 60, &start, &row);
+	failures += expect("ar9311_sfs_depth2", start == 1458 - 16666 &&
+		row == 948, NULL);
+	return failures;
+}
+
 int main(void)
 {
 	int failures = test_validation() + test_mutability() +
-		test_refresh_plan();
+		test_refresh_plan() + test_sfs_schedule();
 
 	printf("ar9311 validation: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

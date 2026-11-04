@@ -28,7 +28,7 @@
 
 /* The CVISP hold depth, read rather than assumed: running with the wrong
  * number starves the camera silently. */
-static int read_depth(void)
+int ar9311_capture_depth(void)
 {
 	FILE *f = fopen(AR9311_CAPTURE_DEPTH_PARAM, "r");
 	int depth = 1;
@@ -39,6 +39,19 @@ static int read_depth(void)
 		fclose(f);
 	}
 	return depth;
+}
+
+int ar9311_capture_set_depth(int depth)
+{
+	FILE *f = fopen(AR9311_CAPTURE_DEPTH_PARAM, "w");
+	int ok;
+
+	if (!f)
+		return -1;
+	ok = fprintf(f, "%d\n", depth) > 0;
+	if (fclose(f) != 0)
+		ok = 0;
+	return ok && ar9311_capture_depth() == depth ? 0 : -1;
 }
 
 static int read_geometry(int fd, Ar9311Geometry *geo)
@@ -140,7 +153,7 @@ int ar9311_capture_open(Ar9311Capture *cap, uint32_t width, uint32_t height)
 	}
 	if (export_buffers(cap) != 0)
 		return -1;
-	cap->max_held = cap->buf_count - (read_depth() + 1);
+	cap->max_held = cap->buf_count - (ar9311_capture_depth() + 1);
 	if (cap->max_held > AR9311_CAPTURE_HELD_MAX)
 		cap->max_held = AR9311_CAPTURE_HELD_MAX;
 	if (cap->max_held < 1)

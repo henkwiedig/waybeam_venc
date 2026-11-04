@@ -489,6 +489,16 @@ static int test_field_support_by_backend(void)
 	CHECK("flip supported ar9311",
 		venc_api_field_supported_for_backend("ar9311",
 			"image.flip") == 1);
+	/* Sub-frame sync is AR9311's camera/encoder overlap. */
+	CHECK("sub_frame_sync supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
+			"video0.subFrameSync") == 1);
+	CHECK("sub_frame_sync unsupported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.sub_frame_sync") == 0);
+	CHECK("sub_frame_sync unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.sub_frame_sync") == 0);
 
 	CHECK("scene_threshold supported star6e",
 		venc_api_field_supported_for_backend("star6e",

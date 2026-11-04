@@ -1,5 +1,31 @@
 # History
 
+## [0.93.0] - 2026-11-04
+
+AR9311: **sub-frame sync, ~6 ms less air latency.**  `contract_version`
+moves to **0.37.0**.  New `video0.subFrameSync` (`video0.sub_frame_sync`,
+bool, restart, AR9311 only; on in the AR9311 default config): the wave5
+encoder takes each camera frame while the CVISP is still writing it.
+
+- The CVISP runs at depth 1, which hands a buffer back as its write starts
+  (waybeam writes `/sys/module/ar_cvisp/parameters/depth` before it opens
+  the camera: 1 on, 2 off), and the encoder works through it 64 lines at a
+  time.  The bands are released by the kernel driver on a schedule from
+  the buffer's timestamp, set through two encoder controls at open: band n
+  at +1458 + 948 n us at 1080p60 (`ar9311_encoder_sfs_schedule()`,
+  host-tested): the CVISP write measured on a P1 (band n in memory at
+  timestamp + 925 + 947 n us), plus 110 us for chroma and a 400 us margin.
+- The published `pts` gets one frame period added at depth 1, where the
+  camera timestamp marks the start of the write, so it still means "frame
+  complete" and latency figures stay comparable.
+- Needs the OpenIPC builder's P1 kernel patches
+  `0004-media-wave5-sub-frame-sync` and
+  `0005-media-artosyn-cvisp-depth-per-stream`; probed at start (the
+  encoder's `V4L2_CID_WAVE5_SFS_ROW_US`, a writable depth), without them it
+  warns and runs off.
+- Measured on a P1 at ~22 Mbit/s with `ar8030-transport-tx`: capture ->
+  write start 8.8-9.4 ms -> 2.5-3.0 ms; 60 fps, 0 camera skips.
+
 ## [0.92.2] - 2026-11-04
 
 AR9311: **intra refresh counts wave5's 64-line rows.**  `contract_version`

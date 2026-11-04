@@ -34,6 +34,14 @@ typedef struct {
 	int streaming;
 } Ar9311Capture;
 
+/** The CVISP hold depth: buffers are handed back this many frame ticks
+ *  after they were armed (1 = as the write starts, 2 = just after it). */
+int ar9311_capture_depth(void);
+
+/** Set it for the next stream (before ar9311_capture_open).  0, or -1 where
+ *  the kernel only reads it at load (no builder CVISP depth patch). */
+int ar9311_capture_set_depth(int depth);
+
 /** Find the ar-cvisp node, check it delivers width x height, allocate and
  *  export the buffers and queue them all.  Returns 0 or -1. */
 int ar9311_capture_open(Ar9311Capture *cap, uint32_t width, uint32_t height);

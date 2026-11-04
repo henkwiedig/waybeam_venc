@@ -13,6 +13,7 @@
     "bitrate": 8000,
     "gopSize": 1.0,
     "sliceCount": 1,
+    "subFrameSync": true,
     "resilience": "racing",
     "framing": "off"
   },

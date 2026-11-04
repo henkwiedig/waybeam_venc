@@ -24,9 +24,11 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   The block writes a buffer during the frame *after* the tick that armed
   it, so depth 2 hands it back about 1 ms after its last row; the driver's
   default 3 adds a whole frame (16.7 ms at 60 fps) and 1 hands it back
-  before it is written (torn frames).  The OpenIPC builder sets 2.  The
-  buffer timestamp is the hand-back time, so this delay never shows in a
-  capture-to-display figure built on it.
+  as the write starts (torn frames, unless the encoder follows the write:
+  sub-frame sync, below).  waybeam sets the depth before it opens the
+  camera: 1 with `video0.subFrameSync`, 2 without.  The buffer timestamp
+  is the hand-back time, so this delay never shows in a capture-to-display
+  figure built on it.
 - **Encode** (`src/ar9311_encoder.c`): the wave5 mem2mem encoder imports the
   camera planes at their own strides (zero copy) and returns one Annex-B
   access unit per bitstream buffer. H.265 Main, level 4.1, CBR with
@@ -92,6 +94,40 @@ Measured on a P1 with `racing` at 14 Mbit/s: P-frames average 28 KB and
 peak at 39 KB, and the only I-frame is 51 KB. Over the radio for 60 s:
 0 RTP gaps, 0 IDR requests from the ground, frame writes 6-10 ms at most
 (70-99 ms with IDRs), capture to write 12 ms (25-31 ms), and 0 camera skips.
+
+## Sub-frame sync
+
+`video0.subFrameSync` (restart; on in the AR9311 default config) overlaps
+the encode with the camera's write.  The CVISP hands each buffer back as it
+starts writing it (depth 1) and the wave5 encoder takes it at once,
+working through it 64 lines (one CTU row) at a time: before each band it
+waits for a toggle in its sub-frame sync register (register mode,
+Chips&Media's `ENC_SET_SUB_FRAME_SYNC`).  Nothing in the SoC tells software
+how far the camera has got, so the kernel driver releases the bands on a
+schedule from the buffer's timestamp, which waybeam passes in at open:
+
+- **Timing**, measured on a P1 by marking the last line of every 64-line
+  band before QBUF and polling for the overwrite (240 frames): at depth 1,
+  band n is in memory at timestamp + 925 + 947 n us, chroma 60-110 us
+  after its luma, spread <= ~100 us.  947 us / 64 lines is the sensor's
+  line time (1/60 s over 1125 lines).  waybeam releases band n at
+  +1458 + 948 n us: the write, 110 us for chroma and a 400 us margin
+  (`ar9311_encoder_sfs_schedule()`).  A band released early would be encoded
+  from the previous frame's memory; a late one only costs latency.
+- **Effect**: the access unit is ready ~1.7 ms after the frame's last line
+  is in memory instead of ~8 ms.  `ar8030-transport-tx`'s capture -> write
+  start on a P1 at ~22 Mbit/s: 8.8-9.4 ms off, 2.5-3.0 ms on; 60 fps,
+  0 camera skips either way.
+- **Timestamps**: at depth 1 the camera timestamp marks the start of the
+  write, so waybeam adds one frame period before it publishes it: the
+  frame-shm `pts` stays the moment the frame is complete (+0.9 ms), as at
+  depth 2, and latency figures keep their meaning.
+- **Kernel**: the OpenIPC builder's P1 patches `0004-media-wave5-sub-frame-sync`
+  (the `V4L2_CID_WAVE5_SFS_START_US` / `V4L2_CID_WAVE5_SFS_ROW_US` encoder
+  controls, the firmware's five one-hot source slots) and
+  `0005-media-artosyn-cvisp-depth-per-stream` (a writable `depth`, read at
+  REQBUFS).  Without either, waybeam warns and runs without, at depth 2.
+  The firmware runs one sub-frame sync instance at a time.
 
 ## Auto-exposure
 
@@ -183,7 +219,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.

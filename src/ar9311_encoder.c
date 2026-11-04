@@ -28,6 +28,15 @@
  * recover resets the codec block and re-downloads its firmware. */
 #define AR9311_WAVE5_STATE "/sys/kernel/debug/wave5/state"
 #define AR9311_WAVE5_RECOVER "/sys/kernel/debug/wave5/recover"
+/* The sub-frame sync controls of the builder's wave5 kernel patch.  waybeam
+ * builds against kernel headers that predate them. */
+#ifndef V4L2_CID_USER_WAVE5_BASE
+#define V4L2_CID_USER_WAVE5_BASE (V4L2_CID_USER_BASE + 0x1300)
+#endif
+#ifndef V4L2_CID_WAVE5_SFS_START_US
+#define V4L2_CID_WAVE5_SFS_START_US (V4L2_CID_USER_WAVE5_BASE + 0)
+#define V4L2_CID_WAVE5_SFS_ROW_US (V4L2_CID_USER_WAVE5_BASE + 1)
+#endif
 
 static int set_ctrl(int fd, uint32_t id, int32_t value, const char *name)
 {
@@ -299,6 +308,33 @@ static void reset_vpu(void)
 	printf("> [ar9311] VPU reset (block reset + firmware reload)\n");
 }
 
+int ar9311_encoder_has_sfs(void)
+{
+	struct v4l2_queryctrl q;
+	int fd, ok;
+
+	fd = ar9311_v4l2_open_by_name(AR9311_ENCODER_NODE_NAME);
+	if (fd < 0)
+		return 0;
+	memset(&q, 0, sizeof(q));
+	q.id = V4L2_CID_WAVE5_SFS_ROW_US;
+	ok = ioctl(fd, VIDIOC_QUERYCTRL, &q) == 0;
+	close(fd);
+	return ok;
+}
+
+/* Set before STREAMON: the driver latches the schedule when the stream
+ * starts. */
+static int set_sub_frame_sync(int fd, const Ar9311EncoderParams *params)
+{
+	if (!params->sfs_row_us)
+		return 0;
+	return set_ctrl(fd, V4L2_CID_WAVE5_SFS_START_US, params->sfs_start_us,
+			"sfs_start_us") != 0 ||
+		set_ctrl(fd, V4L2_CID_WAVE5_SFS_ROW_US,
+			(int32_t)params->sfs_row_us, "sfs_row_us") != 0 ? -1 : 0;
+}
+
 int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 	int src_count, const Ar9311EncoderParams *params)
 {
@@ -312,7 +348,8 @@ int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 		return -1;
 	if (set_source_format(enc->fd, src) != 0 ||
 	    set_stream_format(enc->fd, src) != 0 ||
-	    set_rate_control(enc->fd, params) != 0)
+	    set_rate_control(enc->fd, params) != 0 ||
+	    set_sub_frame_sync(enc->fd, params) != 0)
 		return -1;
 	if (request_buffers(enc->fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
 		V4L2_MEMORY_DMABUF, (uint32_t)src_count) != 0)

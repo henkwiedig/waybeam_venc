@@ -522,6 +522,14 @@ static const FieldUi ui_intra_refresh_qp = {
 	"of growing it. Restart-only; needs resilience != off."
 };
 
+static const FieldUi ui_sub_frame_sync = {
+	"Video", "Sub-frame sync", "toggle", 0, 0, 0, NULL,
+	"AR9311: the encoder starts on each camera frame while the camera is "
+	"still writing it and follows it 64 lines at a time, so a picture is "
+	"encoded ~1.7 ms after its last line instead of ~8 ms. Needs the "
+	"OpenIPC builder's wave5 sub-frame sync and CVISP depth kernel "
+	"patches; without them it stays off. Restart-only."
+};
 static const FieldUi ui_slice_output = {
 	"Video", "Early slice output", "toggle", 0, 0, 0, NULL,
 	"CV610: each slice leaves the encoder, and goes out on frame-SHM, as "
@@ -686,6 +694,7 @@ static const FieldDesc g_fields[] = {
 	FIELD(video0, scene_holdoff,   FT_UINT8,  MUT_RESTART),
 	FIELD_UI(video0, slice_count,  FT_UINT,   MUT_RESTART, &ui_slice_count),
 	FIELD_UI(video0, slice_output, FT_BOOL,   MUT_RESTART, &ui_slice_output),
+	FIELD_UI(video0, sub_frame_sync, FT_BOOL, MUT_RESTART, &ui_sub_frame_sync),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
@@ -819,6 +828,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sceneHoldoff", "video0.scene_holdoff" },
 	{ "video0.sliceCount", "video0.slice_count" },
 	{ "video0.sliceOutput", "video0.slice_output" },
+	{ "video0.subFrameSync", "video0.sub_frame_sync" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -936,7 +946,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"sensor.index", "sensor.mode",
 			"video0.fps", "video0.size", "video0.bitrate",
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
-			"video0.resilience",
+			"video0.resilience", "video0.sub_frame_sync",
 			"isp.gain_max", "isp.gain_min",
 			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
 			"isp.anti_flicker_hz",
@@ -1167,6 +1177,11 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	 * decimate through video0.fps itself, which is live there. */
 	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
+		return 0;
+
+	/* video0.sub_frame_sync is AR9311's camera/encoder overlap (AR9311
+	 * returned above, and CV610's own list does not carry it). */
+	if (strcmp(canonical_key, "video0.sub_frame_sync") == 0)
 		return 0;
 
 	/* video0.slice_output is the CV610 encoder's early slice output.  The

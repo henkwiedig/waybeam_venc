@@ -97,6 +97,12 @@ typedef struct {
 	uint8_t gdr_counter;      /* position of the next frame in the wave */
 	uint8_t *wave_buf;        /* param sets + access unit, frame-shm only */
 	size_t wave_buf_len;
+
+	/* Added to the camera timestamp before it is published: at CVISP depth
+	 * 1 it marks the start of the write, so one frame period keeps the
+	 * published capture time where depth 2 puts it (just after the write)
+	 * and latency figures comparable. */
+	uint64_t pts_offset_us;
 } Ar9311RunnerContext;
 
 /* The shared VencApplyCallbacks ABI carries no opaque pointer, so like every
@@ -792,6 +798,40 @@ static void ar9311_plan_refresh(Ar9311RunnerContext *ctx,
 	pthread_mutex_unlock(&g_ar9311_status_mutex);
 }
 
+/* Sub-frame sync, decided before the camera opens: it reads the CVISP depth
+ * at REQBUFS.  On needs both builder kernel patches (wave5 sub-frame sync,
+ * CVISP depth per stream) and runs the camera at depth 1, where a buffer
+ * comes back as the write starts; off runs depth 2, where it comes back
+ * written.  Depth 1 without sub-frame sync would encode torn frames. */
+static void ar9311_plan_sfs(Ar9311RunnerContext *ctx,
+	Ar9311EncoderParams *params)
+{
+	int on = ctx->config.video0.sub_frame_sync;
+
+	ctx->pts_offset_us = 0;
+	if (on && !ar9311_encoder_has_sfs()) {
+		fprintf(stderr, "WARNING: [ar9311] video0.subFrameSync: this "
+			"kernel's wave5 has no sub-frame sync (builder patch "
+			"0004-media-wave5-sub-frame-sync); running without\n");
+		on = 0;
+	}
+	if (ar9311_capture_set_depth(on ? 1 : 2) != 0 && on) {
+		fprintf(stderr, "WARNING: [ar9311] video0.subFrameSync: the CVISP "
+			"depth cannot be set (builder patch 0005-media-artosyn-"
+			"cvisp-depth-per-stream); running without\n");
+		on = 0;
+	}
+	if (!on)
+		return;
+	ar9311_encoder_sfs_schedule((uint32_t)ar9311_capture_depth(), AR9311_FPS,
+		&params->sfs_start_us, &params->sfs_row_us);
+	ctx->pts_offset_us = 1000000u / AR9311_FPS;
+	printf("> [ar9311] sub-frame sync: CVISP depth %d, band 0 at +%d us, "
+		"%u us per %u lines\n", ar9311_capture_depth(),
+		(int)params->sfs_start_us, params->sfs_row_us,
+		AR9311_SFS_BAND_LINES);
+}
+
 static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 {
 	Ar9311EncoderParams params;
@@ -806,6 +846,7 @@ static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 	params.mirror = ctx->config.image.mirror;
 	params.flip = ctx->config.image.flip;
 	ar9311_plan_refresh(ctx, &params);
+	ar9311_plan_sfs(ctx, &params);
 	if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH, AR9311_HEIGHT) != 0)
 		return -1;
 	if (ar9311_encoder_open(&ctx->encoder, &ctx->capture.geo,
@@ -908,7 +949,8 @@ static int ar9311_drain_stream(Ar9311RunnerContext *ctx)
 	while ((ret = ar9311_encoder_dequeue_stream(&ctx->encoder, &slot, &data,
 		&len, &capture_us)) == 0) {
 		if (len > 0) {
-			ar9311_publish_frame(ctx, data, len, capture_us);
+			ar9311_publish_frame(ctx, data, len,
+				capture_us + ctx->pts_offset_us);
 			ctx->last_frame_us = wb_monotonic_us();
 		}
 		if (ar9311_encoder_release_stream(&ctx->encoder, slot) != 0)

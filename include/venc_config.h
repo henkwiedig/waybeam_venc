@@ -161,6 +161,10 @@ typedef struct {
 	                            * goes on frame-SHM) as soon as it is encoded,
 	                            * not with the whole picture.  Needs
 	                            * slice_count > 1; turns max_frame_pct off. */
+	bool sub_frame_sync;       /* AR9311: the encoder takes each camera
+	                            * frame while it is still being written,
+	                            * 64 lines at a time (CVISP depth 1 + wave5
+	                            * sub-frame sync). */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

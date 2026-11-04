@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.36.1`
+- `contract_version`: `0.37.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -46,6 +46,7 @@
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
 | `isp.antiFlickerHz` | **false** | **false** | **false** (AR9311 only, **from 0.35.0**) |
+| `video0.subFrameSync` | **false** | **false** | **false** (AR9311 only, **from 0.37.0**) |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 | `outgoing.server` that cannot be brought up | inert output, craft runs (**from 0.82.0**) | same | same |
 
@@ -112,8 +113,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.92.2",
-    "contract_version": "0.36.1",
+    "app_version": "0.93.0",
+    "contract_version": "0.37.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -329,7 +330,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `isp.keepAspect`, `isp.shutterRule180`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
-`video0.intraRefreshMode`, `video0.intraRefreshLines`,
+`video0.intraRefreshMode`, `video0.intraRefreshLines`, `video0.subFrameSync`,
 `video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
@@ -754,6 +755,15 @@ curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
 - In slice mode the ring has 16 slots of 256 KiB instead of 8 of 512 KiB (the same 4 MiB).
 - **Measured** on the Ascent Lite (OS02K10 1080p60) over the AR8030 link to the VRX Pro, 60-90 s per run: at a fixed 16 Mbit/s, capture -> reassembled on the ground 34.3 -> 27.9 ms average with 3 slices (2: 28.4, 4: 28.4, 6: 30.7 with stalls — every slice is one more `bb_socket_write()`, about 1 ms each); with the link's own rate controller at ~22 Mbit/s 38.3 -> 30.2 ms average, 53.0 -> 43.8 ms max, and the ground's vsync-lock target 57.0 -> 47.3 ms with the same drop rate. Three slices without early output changed nothing (34.3 ms).
 - `supported:false` on Star6E and Maruko.
+
+### `video0.subFrameSync` (AR9311) — Sub-Frame Sync
+
+`video0.subFrameSync` (canonical `video0.sub_frame_sync`, bool, default `false`; `true` in the AR9311 default config; restart-required, persisted) lets the wave5 encoder take each camera frame while the CVISP is still writing it. The CVISP runs at depth 1, which hands a buffer back as its write starts, and the encoder works through it 64 lines at a time, each band released on a schedule from the buffer's timestamp (band 0 at +1458 us, then every 948 us at 1080p60: the measured write plus 110 us for chroma and a 400 us margin).
+
+- Needs the OpenIPC builder's P1 kernel patches `0004-media-wave5-sub-frame-sync` (the `V4L2_CID_WAVE5_SFS_START_US` / `_ROW_US` encoder controls) and `0005-media-artosyn-cvisp-depth-per-stream` (a writable CVISP `depth`). Without either it logs a warning and runs off. Off runs the CVISP at depth 2.
+- The frame-SHM `pts` stays the moment the frame is complete in memory (+0.9 ms), as without sub-frame sync: at depth 1 the camera timestamp marks the start of the write, so one frame period is added before it is published.
+- **Measured** on a P1 (NT99235 1080p60, ~22 Mbit/s, PI rate control) with `ar8030-transport-tx`: capture -> write start 8.8-9.4 ms -> 2.5-3.0 ms; 60 fps, 0 camera skips.
+- `supported:false` on Star6E, Maruko and CV610.
 
 ### `GET /api/v1/restart`
 
@@ -2034,6 +2044,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.37.0` (additive — sub-frame sync on AR9311): adds `video0.subFrameSync` (`video0.sub_frame_sync`), bool, default `false` (`true` in the AR9311 default config), restart-required, persisted. The wave5 encoder takes each camera frame while it is written (CVISP depth 1, rows released from the frame's timestamp); needs the builder's wave5 and CVISP kernel patches, else it stays off with a warning. The frame-SHM `pts` keeps its meaning. `supported:false` on Star6E, Maruko and CV610. See "`video0.subFrameSync` (AR9311) — Sub-Frame Sync".
 - `0.36.1` (correction — AR9311 intra-refresh rows):
     On AR9311, `GET /api/v1/intra/status` `total_rows` and `lines.effective`
     (and `effective_lines` in `/api/v1/resilience/status`) now count wave5's

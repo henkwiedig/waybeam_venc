@@ -56,6 +56,33 @@ static inline void ar9311_encoder_refresh_plan(uint32_t height,
 	plan->cycle = (plan->total_rows + plan->rows - 1) / plan->rows;
 }
 
+/* Sub-frame sync (the builder's 0004-media-wave5-sub-frame-sync kernel patch):
+ * the encoder takes a camera buffer while the CVISP is still writing it and
+ * works through it 64 lines at a time, each band released on a schedule
+ * from the buffer's timestamp.  At CVISP depth 1 the timestamp marks the
+ * start of the write and line L is in memory (L + 1) line times later;
+ * every further unit of depth hands the buffer back one frame later.
+ * Measured on a P1 (NT99235 1080p60, 1125 lines a frame): band n complete at
+ * ts + 925 + 947 n us, chroma 60-110 us after its luma, spread <= ~100 us. */
+#define AR9311_SFS_LINE_NS 14815   /* 1 s / (60 fps * 1125 lines) */
+#define AR9311_SFS_BAND_LINES 64
+#define AR9311_SFS_CHROMA_US 110
+#define AR9311_SFS_MARGIN_US 400
+
+/** Band 0 release (@p start_us after the timestamp) and band period
+ *  (@p row_us) for a CVISP hold depth (>= 1) at @p fps. */
+static inline void ar9311_encoder_sfs_schedule(uint32_t depth, uint32_t fps,
+	int32_t *start_us, uint32_t *row_us)
+{
+	uint32_t band_us = (AR9311_SFS_BAND_LINES * AR9311_SFS_LINE_NS + 500u) /
+		1000u;
+
+	*row_us = band_us;
+	*start_us = (int32_t)(band_us + AR9311_SFS_CHROMA_US +
+		AR9311_SFS_MARGIN_US) -
+		(int32_t)((depth - 1u) * (1000000u / fps));
+}
+
 typedef struct {
 	uint32_t fps;
 	uint32_t bitrate_kbps;
@@ -69,6 +96,8 @@ typedef struct {
 	uint32_t max_qp;       /* 0 = driver default */
 	int mirror;            /* left-right, done by the encoder */
 	int flip;              /* upside down; both = rotated 180 degrees */
+	int32_t sfs_start_us;  /* sub-frame sync schedule (see above) */
+	uint32_t sfs_row_us;   /* 0 = sub-frame sync off */
 } Ar9311EncoderParams;
 
 typedef struct {
@@ -81,6 +110,10 @@ typedef struct {
 	uint8_t *stream_copy;  /* cached copy of the last access unit taken */
 	int streaming;
 } Ar9311Encoder;
+
+/** 1 when the encoder has the sub-frame sync controls, else 0.  Opens and
+ *  closes the node without streaming, which leaves the firmware alone. */
+int ar9311_encoder_has_sfs(void);
 
 /** Reset the VPU (see above), find the encoder node, program it for the
  *  camera geometry and @p params,

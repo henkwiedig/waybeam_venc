@@ -42,6 +42,7 @@
     "sceneHoldoff": 2,
     "sliceCount": 1,
     "sliceOutput": false,
+    "subFrameSync": false,
     "resilience": "off",
     "intraRefreshQp": 0,
     "zoomX": 0.5,
