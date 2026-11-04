@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.36.0`
+- `contract_version`: `0.36.1`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -112,8 +112,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.92.1",
-    "contract_version": "0.36.0",
+    "app_version": "0.92.2",
+    "contract_version": "0.36.1",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -2034,6 +2034,14 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.36.1` (correction — AR9311 intra-refresh rows):
+    On AR9311, `GET /api/v1/intra/status` `total_rows` and `lines.effective`
+    (and `effective_lines` in `/api/v1/resilience/status`) now count wave5's
+    64-line refresh rows: `total_rows` reads `17` at 1080p instead of `34`,
+    and `racing` reports `2` rows per frame instead of `4`.  The refresh
+    itself is unchanged for the shipped presets.  `lines.requested` is still
+    the configured value, in the shared 32-line rows.  No other backend
+    changes.
 - `0.36.0` (additive — AR9311 gains the IQ routes and orientation):
     AR9311 now serves `GET /api/v1/iq` and `GET /api/v1/iq/set` in the CV610
     response shape, with the subset documented under "AR9311 subset":

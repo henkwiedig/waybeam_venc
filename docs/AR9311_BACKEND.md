@@ -63,12 +63,19 @@ Instead every P-frame intra-codes a band of CTU rows, and the band walks down
 the picture (wave5 cyclic intra refresh, `intra_refresh_mode` CTU rows).
 
 - **Presets:** `off`, `rescue`, `quality`, `sprint`, `racing`, `endurance`,
-  `patrol`. The shared `intra_refresh_compute()` gives the rows per frame,
-  and the backend rounds them so that the period divides the 34 CTU rows of
-  1080p. For example `racing` is 4 rows per frame and a full refresh every
-  9 frames (150 ms). The presets with a base/enhance reference structure
-  (SVC-T) are rejected because wave5 has no such control. Changing the
-  preset needs a restart. `video0.gopSize` is ignored while refresh is on.
+  `patrol`. The shared `intra_refresh_compute()` gives the rows per frame
+  in 32-line rows (the CV610 and SigmaStar CTU); wave5 codes 64x64 CTUs, so
+  the backend halves them, rounding up, and picks a period for the 17
+  64-line rows of 1080p (`ar9311_encoder_refresh_plan()`). The driver
+  refreshes rows / period rows per picture and every row of every picture
+  for a period above the row count, so the period never exceeds 17.
+  `racing` and `sprint` refresh 2 rows (128 lines) per frame, a full
+  refresh every 9 frames (150 ms); `endurance` and `patrol` 1 row, every
+  17 frames (283 ms, the slowest wave5 refresh at 1080p). The `intra`
+  status counts these 64-line rows. The presets with a base/enhance
+  reference structure (SVC-T) are rejected because wave5 has no such
+  control. Changing the preset needs a restart. `video0.gopSize` is ignored
+  while refresh is on.
 - **Stream:** one IDR at start, and then on `GET /request/idr`. Frame-shm
   frames carry the GDR position and cycle length in their meta. Each refresh
   wave's head gets VPS/SPS/PPS prepended (RTP and frame-shm), so a receiver

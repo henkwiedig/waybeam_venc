@@ -1,3 +1,4 @@
+#include "ar9311_encoder.h"
 #include "ar9311_validation.h"
 #include "venc_api.h"
 #include "venc_config.h"
@@ -127,9 +128,39 @@ static int test_mutability(void)
 	return failures;
 }
 
+static int expect_plan(const char *name, uint32_t shared_rows,
+	uint32_t period, uint32_t rows, uint32_t cycle)
+{
+	Ar9311RefreshPlan p;
+	char detail[96];
+
+	ar9311_encoder_refresh_plan(AR9311_HEIGHT, shared_rows, &p);
+	snprintf(detail, sizeof(detail), "total %u period %u rows %u cycle %u",
+		p.total_rows, p.period, p.rows, p.cycle);
+	return expect(name, p.total_rows == 17 && p.period == period &&
+		p.rows == rows && p.cycle == cycle, detail);
+}
+
+/* 1080 lines are 17 of wave5's 64-line rows; the shared helper asks in
+ * 32-line rows (fast 4, balanced 2, robust 1 at 1080p60). */
+static int test_refresh_plan(void)
+{
+	int failures = 0;
+
+	failures += expect_plan("ar9311_refresh_fast", 4, 8, 2, 9);
+	failures += expect_plan("ar9311_refresh_balanced", 2, 17, 1, 17);
+	/* Was period 34: above the row count, wave5 refreshed every row of
+	 * every picture. */
+	failures += expect_plan("ar9311_refresh_robust", 1, 17, 1, 17);
+	failures += expect_plan("ar9311_refresh_3_shared_rows", 3, 8, 2, 9);
+	failures += expect_plan("ar9311_refresh_whole_picture", 34, 1, 17, 1);
+	return failures;
+}
+
 int main(void)
 {
-	int failures = test_validation() + test_mutability();
+	int failures = test_validation() + test_mutability() +
+		test_refresh_plan();
 
 	printf("ar9311 validation: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

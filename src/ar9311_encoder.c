@@ -321,7 +321,7 @@ int ar9311_encoder_open(Ar9311Encoder *enc, const Ar9311Geometry *src,
 		return -1;
 	if (params->refresh_period)
 		printf("> [ar9311] encoder H.265 %ux%u@%u, %u kbps CBR, intra "
-			"refresh over %u frames, no periodic IDR\n", src->width,
+			"refresh period %u, no periodic IDR\n", src->width,
 			src->height, params->fps, params->bitrate_kbps,
 			params->refresh_period);
 	else

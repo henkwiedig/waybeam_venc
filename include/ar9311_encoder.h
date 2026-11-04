@@ -23,13 +23,46 @@
 #define AR9311_ENCODER_STREAM_BUFS 4
 #define AR9311_ENCODER_GOP_MAX 2047  /* V4L2_CID_MPEG_VIDEO_GOP_SIZE range */
 
+/* wave5 codes H.265 in 64x64 CTUs, so its cyclic intra refresh walks rows
+ * of 64 picture lines: 17 at 1080p.  The driver turns a refresh period P
+ * into rows / P rows per picture and refreshes every row of every picture
+ * when P exceeds the row count.  The shared intra_refresh_compute() counts
+ * 32-line rows, the CV610 and SigmaStar CTU. */
+#define AR9311_ENCODER_REFRESH_ROW_LINES 64
+
+typedef struct {
+	uint32_t total_rows;  /* refresh rows in the picture */
+	uint32_t period;      /* the V4L2 refresh period, 1..total_rows */
+	uint32_t rows;        /* rows refreshed per picture */
+	uint32_t cycle;       /* pictures per full refresh */
+} Ar9311RefreshPlan;
+
+/** Plan wave5's refresh for a picture @p height (> 0) lines tall that
+ *  should refresh at least @p shared_rows of intra_refresh_compute()'s
+ *  32-line rows per picture. */
+static inline void ar9311_encoder_refresh_plan(uint32_t height,
+	uint32_t shared_rows, Ar9311RefreshPlan *plan)
+{
+	uint32_t want = (shared_rows + 1) / 2;
+
+	plan->total_rows = (height + AR9311_ENCODER_REFRESH_ROW_LINES - 1) /
+		AR9311_ENCODER_REFRESH_ROW_LINES;
+	if (want < 1)
+		want = 1;
+	if (want > plan->total_rows)
+		want = plan->total_rows;
+	plan->period = plan->total_rows / want;
+	plan->rows = plan->total_rows / plan->period;
+	plan->cycle = (plan->total_rows + plan->rows - 1) / plan->rows;
+}
+
 typedef struct {
 	uint32_t fps;
 	uint32_t bitrate_kbps;
 	uint32_t gop_frames;   /* frames between IDRs, 1..AR9311_ENCODER_GOP_MAX;
 	                        * ignored with refresh_period set */
-	uint32_t refresh_period; /* cyclic intra refresh: whole picture over
-	                          * this many frames, no periodic IDR; 0 = off
+	uint32_t refresh_period; /* cyclic intra refresh period, see
+	                          * Ar9311RefreshPlan; no periodic IDR; 0 = off
 	                          * (needs the builder's wave5 intra-refresh
 	                          * kernel patch) */
 	uint32_t min_qp;       /* 0 = driver default */

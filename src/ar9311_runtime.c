@@ -750,45 +750,43 @@ static int ar9311_prepare(void *opaque)
 
 /* Map the resilience preset's intra mode onto wave5's cyclic refresh.  The
  * shared intra_refresh_compute() gives the rows per picture for the mode's
- * heal window; wave5 takes a period instead (it refreshes total/period rows
- * per picture), so pick the period that gives at least those rows.  No
- * stripe QP: wave5 has no such control, so intraRefreshQp is not read. */
+ * heal window, in 32-line rows; wave5 refreshes 64-line rows and takes a
+ * period instead (ar9311_encoder_refresh_plan()).  No stripe QP: wave5 has
+ * no such control, so intraRefreshQp is not read. */
 static void ar9311_plan_refresh(Ar9311RunnerContext *ctx,
 	Ar9311EncoderParams *params)
 {
 	Ar9311IntraRefreshStatus st;
+	Ar9311RefreshPlan plan;
 	IntraRefreshDerived d;
 	IntraRefreshMode mode;
-	uint32_t period = 0, rows = 0;
 
+	memset(&plan, 0, sizeof(plan));
 	mode = intra_refresh_parse_mode(ctx->config.video0.intra_refresh_mode);
 	intra_refresh_compute(mode, AR9311_HEIGHT, AR9311_FPS,
 		ctx->config.video0.intra_refresh_lines, 0,
 		ctx->config.video0.gop_size, &d);
 	if (mode != INTRA_MODE_OFF && d.lines > 0 && d.total_rows > 0) {
-		period = d.total_rows / d.lines;
-		if (period < 1)
-			period = 1;
-		rows = d.total_rows / period;
+		ar9311_encoder_refresh_plan(AR9311_HEIGHT, d.lines, &plan);
 		ctx->gdr_active = 1;
-		ctx->gdr_cycle_len = (uint8_t)((d.total_rows + rows - 1) / rows);
+		ctx->gdr_cycle_len = (uint8_t)plan.cycle;
 	}
-	params->refresh_period = period;
+	params->refresh_period = plan.period;
 
 	memset(&st, 0, sizeof(st));
 	snprintf(st.mode_name, sizeof(st.mode_name), "%s",
 		intra_refresh_mode_name(mode));
-	st.active = period > 0;
+	st.active = plan.period > 0;
 	st.mi_supported = 1;
 	st.apply_ok = 1;
 	st.target_ms = d.target_ms;
-	st.total_rows = d.total_rows;
+	st.total_rows = plan.total_rows;
 	st.requested_lines = ctx->config.video0.intra_refresh_lines;
-	st.effective_lines_per_p = rows;
+	st.effective_lines_per_p = plan.rows;
 	st.lines_clamped = d.lines_clamped;
 	st.explicit_gop_sec = ctx->config.video0.gop_size;
 	/* With refresh on there is no periodic IDR at all. */
-	st.effective_gop_sec = period ? 0.0 : ctx->config.video0.gop_size;
+	st.effective_gop_sec = plan.period ? 0.0 : ctx->config.video0.gop_size;
 	pthread_mutex_lock(&g_ar9311_status_mutex);
 	g_ar9311_intra_status = st;
 	pthread_mutex_unlock(&g_ar9311_status_mutex);

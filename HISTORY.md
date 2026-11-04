@@ -1,5 +1,23 @@
 # History
 
+## [0.92.2] - 2026-11-04
+
+AR9311: **intra refresh counts wave5's 64-line rows.**  `contract_version`
+moves to **0.36.1**.  The shared `intra_refresh_compute()` counts 32-line
+rows (34 at 1080p, the CV610 and SigmaStar CTU), and the backend handed its
+result to wave5 as a period over those 34 rows.  wave5 codes 64x64 CTUs:
+the driver refreshes 17 / period rows per picture, and every row of every
+picture once the period is above 17.  A one-row request (`robust`, or
+`video0.intraRefreshLines` 1) therefore sent period 34 and made every
+picture intra; other line counts reported the wrong cycle in the frame-shm
+GDR meta (3 lines: 12 frames reported, 17 coded).  The backend now halves
+the rows, rounding up, and plans the period on the 17 rows
+(`ar9311_encoder_refresh_plan()`, host-tested).  The shipped presets refresh
+exactly as before -- `racing`/`sprint` 2 rows a frame, a 9-frame cycle;
+`endurance`/`patrol` 1 row, 17 frames -- but `/api/v1/intra/status` now
+reports those rows: `total_rows` 17 instead of 34, `racing` 2 rows instead
+of 4.
+
 ## [0.92.1] - 2026-10-27
 
 AR9311: **~19 ms less latency.**  The wave5 bitstream buffers are uncached
