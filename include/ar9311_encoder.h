@@ -99,7 +99,10 @@ typedef struct {
 	int32_t sfs_start_us;  /* sub-frame sync schedule (see above) */
 	uint32_t sfs_row_us;   /* 0 = sub-frame sync off */
 	int no_lf_across_slices; /* deblocking/SAO stop at slice boundaries
-	                          * (video0.strips: each seam is one) */
+	                          * (video0.strips without overlap: each seam
+	                          * is one) */
+	uint32_t slice_ctus;   /* CTUs a slice (all but the last); 0 = one
+	                        * slice a picture */
 } Ar9311EncoderParams;
 
 typedef struct {

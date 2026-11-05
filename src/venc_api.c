@@ -539,6 +539,15 @@ static const FieldUi ui_strips = {
 	"~10 ms; more strips lower the median further but cost the radio "
 	"~1.5 ms per part. Needs sub-frame sync. Restart-only."
 };
+static const FieldUi ui_strip_overlap = {
+	"Video", "Strip overlap", "number", 0, VENC_STRIP_OVERLAP_MAX, 1, NULL,
+	"AR9311 strips: 64-line rows each strip also encodes past each seam "
+	"and drops again. Without them a tilt that moves the picture across a "
+	"seam leaves errors that spread until the intra refresh passes; 1 row "
+	"cuts them 10x or more and lets the slice edges be deblocked, for "
+	"~1.5 ms more latency. 2 would also cover moves of more than 64 lines "
+	"a frame (not measured). Restart-only."
+};
 static const FieldUi ui_slice_output = {
 	"Video", "Early slice output", "toggle", 0, 0, 0, NULL,
 	"CV610: each slice leaves the encoder, and goes out on frame-SHM, as "
@@ -705,6 +714,7 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(video0, slice_output, FT_BOOL,   MUT_RESTART, &ui_slice_output),
 	FIELD_UI(video0, sub_frame_sync, FT_BOOL, MUT_RESTART, &ui_sub_frame_sync),
 	FIELD_UI(video0, strips,       FT_UINT,   MUT_RESTART, &ui_strips),
+	FIELD_UI(video0, strip_overlap, FT_UINT,  MUT_RESTART, &ui_strip_overlap),
 	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
 	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
@@ -839,6 +849,7 @@ static const FieldAlias g_field_aliases[] = {
 	{ "video0.sliceCount", "video0.slice_count" },
 	{ "video0.sliceOutput", "video0.slice_output" },
 	{ "video0.subFrameSync", "video0.sub_frame_sync" },
+	{ "video0.stripOverlap", "video0.strip_overlap" },
 	{ "video0.intraRefreshQp", "video0.intra_refresh_qp" },
 	{ "video0.zoomX", "video0.zoom_x" },
 	{ "video0.zoomY", "video0.zoom_y" },
@@ -957,7 +968,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"video0.fps", "video0.size", "video0.bitrate",
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
 			"video0.resilience", "video0.sub_frame_sync",
-			"video0.strips",
+			"video0.strips", "video0.strip_overlap",
 			"isp.gain_max", "isp.gain_min",
 			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
 			"isp.anti_flicker_hz",
@@ -1190,11 +1201,12 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
 		return 0;
 
-	/* video0.sub_frame_sync and video0.strips are AR9311's camera/encoder
-	 * overlap (AR9311 returned above, and CV610's own list does not carry
-	 * them). */
+	/* video0.sub_frame_sync, video0.strips and video0.strip_overlap are
+	 * AR9311's camera/encoder overlap (AR9311 returned above, and CV610's
+	 * own list does not carry them). */
 	if (strcmp(canonical_key, "video0.sub_frame_sync") == 0 ||
-	    strcmp(canonical_key, "video0.strips") == 0)
+	    strcmp(canonical_key, "video0.strips") == 0 ||
+	    strcmp(canonical_key, "video0.strip_overlap") == 0)
 		return 0;
 
 	/* video0.slice_output is the CV610 encoder's early slice output.  The
@@ -1601,6 +1613,9 @@ static const char *validate_field_cfg(const VencConfig *cfg, const char *key)
 	if (strcmp(key, "video0.strips") == 0 &&
 	    cfg->video0.strips > VENC_STRIPS_MAX)
 		return "video0.strips must be 0..4";
+	if (strcmp(key, "video0.strip_overlap") == 0 &&
+	    cfg->video0.strip_overlap > VENC_STRIP_OVERLAP_MAX)
+		return "video0.strip_overlap must be 0..2";
 	if (strcmp(key, "video0.min_qp") == 0 || strcmp(key, "video0.max_qp") == 0) {
 		/* H.264/H.265 QP range; the SDK accepts min > max without
 		 * complaint and then behaves erratically (device-observed),
@@ -1698,6 +1713,7 @@ const char *venc_api_validate_loaded_config(const VencConfig *cfg)
 		"video0.scene_holdoff",
 		"video0.slice_count",
 		"video0.strips",
+		"video0.strip_overlap",
 		"video0.zoom_x",
 		"video0.zoom_y",
 		"video0.framing",

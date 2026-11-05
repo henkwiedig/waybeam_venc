@@ -163,6 +163,25 @@ static void ar9311_signal_handler(int signo)
 
 /* ── Live controls ───────────────────────────────────────────────────── */
 
+/* The strips' shares of @p kbps, by the lines each encodes, so that what is
+ * left once the overlap rows are dropped comes to @p kbps. */
+static void ar9311_strips_split(const Ar9311StripPlan *plan, uint32_t kbps,
+	uint32_t *share)
+{
+	uint64_t coded = 0;
+	uint32_t total, left;
+	int k;
+
+	for (k = 0; k < plan->count; k++)
+		coded += plan->enc_height[k];
+	total = left = (uint32_t)((uint64_t)kbps * coded / AR9311_HEIGHT);
+	for (k = 0; k < plan->count; k++) {
+		share[k] = k == plan->count - 1 ? left :
+			(uint32_t)((uint64_t)total * plan->enc_height[k] / coded);
+		left -= share[k];
+	}
+}
+
 static int ar9311_apply_bitrate(uint32_t kbps)
 {
 	Ar9311RunnerContext *ctx = g_ar9311_runner;
@@ -170,18 +189,13 @@ static int ar9311_apply_bitrate(uint32_t kbps)
 	if (!ctx)
 		return -1;
 	if (ctx->strips) {
-		uint32_t left = kbps;
+		uint32_t share[AR9311_STRIPS_MAX];
 		int k;
 
-		for (k = 0; k < ctx->strips; k++) {
-			uint32_t r = k == ctx->strips - 1 ? left :
-				(uint32_t)((uint64_t)kbps * ctx->plan.height[k] /
-					AR9311_HEIGHT);
-
-			left -= r;
-			if (ar9311_encoder_set_bitrate(ctx->se[k], r) != 0)
+		ar9311_strips_split(&ctx->plan, kbps, share);
+		for (k = 0; k < ctx->strips; k++)
+			if (ar9311_encoder_set_bitrate(ctx->se[k], share[k]) != 0)
 				return -1;
-		}
 	} else if (ar9311_encoder_set_bitrate(&ctx->encoder, kbps) != 0) {
 		return -1;
 	}
@@ -900,7 +914,8 @@ static void ar9311_plan_sfs(Ar9311RunnerContext *ctx,
 static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 	const Ar9311EncoderParams *params)
 {
-	uint32_t left = params->bitrate_kbps;
+	uint32_t overlap = ctx->config.video0.strip_overlap;
+	uint32_t share[AR9311_STRIPS_MAX];
 	int n = ctx->strips, k;
 
 	/* Without sub-frame sync the camera hands a frame back only once it
@@ -908,11 +923,12 @@ static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 	 * the frame-shm ring (an RTP sender publishes whole units). */
 	if (!params->sfs_row_us || ar9311_capture_depth() != 1 ||
 	    ctx->output_uri.type != VENC_OUTPUT_URI_FRAME_SHM ||
-	    ar9311_strips_plan(n, AR9311_HEIGHT, params->sfs_start_us,
+	    ar9311_strips_plan(n, AR9311_HEIGHT, overlap, params->sfs_start_us,
 		params->sfs_row_us, &ctx->plan) != 0) {
 		fprintf(stderr, "WARNING: [ar9311] video0.strips needs sub-frame "
-			"sync (CVISP depth 1) and a frame-shm output; encoding "
-			"one picture\n");
+			"sync (CVISP depth 1), a frame-shm output and a "
+			"video0.stripOverlap the strips can take; encoding one "
+			"picture\n");
 		ctx->strips = 0;
 		if (ar9311_capture_open(&ctx->capture, AR9311_WIDTH,
 			AR9311_HEIGHT) != 0 ||
@@ -928,18 +944,26 @@ static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 	ctx->se[0] = &ctx->encoder;
 	for (k = 1; k < n; k++)
 		ctx->se[k] = &ctx->strip_enc[k - 1];
+	ar9311_strips_split(&ctx->plan, params->bitrate_kbps, share);
+	if (overlap)
+		printf("> [ar9311] strips: %u row(s) of 64 lines past each seam, "
+			"sliced off and dropped; loop filter across slice edges\n",
+			overlap);
 	for (k = 0; k < n; k++) {
 		Ar9311EncoderParams p = *params;
 		Ar9311Geometry g = ctx->capture.geo;
 
-		g.height = ctx->plan.height[k];
-		/* each seam is a slice boundary the decoder must not filter
-		 * across: each encoder saw it as its picture's edge */
-		p.no_lf_across_slices = 1;
-		p.bitrate_kbps = k == n - 1 ? left :
-			(uint32_t)((uint64_t)params->bitrate_kbps *
-				ctx->plan.height[k] / AR9311_HEIGHT);
-		left -= p.bitrate_kbps;
+		g.height = ctx->plan.enc_height[k];
+		/* Without overlap each seam is a slice boundary the decoder
+		 * must not filter across: each encoder saw it as its
+		 * picture's edge.  With it the encoders filter their own
+		 * slice edges and the decoder the seam, with pixels both
+		 * encoders had close copies of. */
+		p.no_lf_across_slices = !overlap;
+		p.slice_ctus = ctx->plan.slice_rows[k] *
+			((AR9311_WIDTH + AR9311_STRIPS_ROW_LINES - 1) /
+				AR9311_STRIPS_ROW_LINES);
+		p.bitrate_kbps = share[k];
 		if (k < n - 1) {
 			p.sfs_row_us = 0;
 			p.sfs_start_us = 0;
@@ -949,12 +973,16 @@ static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 		if (ar9311_encoder_open(ctx->se[k], &g, ctx->capture.buf_count,
 			&p) != 0)
 			return -1;
-		printf("> [ar9311] strip %d: lines %u..%u, %u kbps, %s %+d us\n", k,
+		printf("> [ar9311] strip %d: lines %u..%u (encodes %u..%u), %u "
+			"kbps, %s %+d us\n", k,
 			ctx->plan.y0[k], ctx->plan.y0[k] + ctx->plan.height[k] - 1,
+			ctx->plan.enc_y0[k],
+			ctx->plan.enc_y0[k] + ctx->plan.enc_height[k] - 1,
 			p.bitrate_kbps, k < n - 1 ? "queued at" : "sub-frame sync from",
 			k < n - 1 ? (int)ctx->plan.due_us[k] : (int)p.sfs_start_us);
 	}
-	ar9311_merge_init(&ctx->merge, n, ctx->plan.height);
+	ar9311_merge_init(&ctx->merge, n, ctx->plan.enc_height,
+		ctx->plan.overlap_rows);
 	ctx->strip_cap = 1u << 20;
 	ctx->strip_buf = malloc(ctx->strip_cap);
 	if (!ctx->strip_buf)
@@ -1203,7 +1231,7 @@ static int ar9311_strips_issue(Ar9311RunnerContext *ctx, uint64_t now,
 			}
 			if (ar9311_encoder_queue_source_rows(ctx->se[k], pick,
 				ctx->capture.dmabuf[pick], ctx->strip_frame[pick].ts,
-				ctx->plan.y0[k]) != 0)
+				ctx->plan.enc_y0[k]) != 0)
 				return -1;
 			ctx->strip_frame[pick].queued++;
 		}

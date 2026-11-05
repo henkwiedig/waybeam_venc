@@ -9,6 +9,8 @@
 
 _Static_assert(AR9311_STRIPS_MAX == VENC_STRIPS_MAX,
 	"the API bound on video0.strips is the AR9311 one");
+_Static_assert(AR9311_STRIPS_OVERLAP_MAX == VENC_STRIP_OVERLAP_MAX,
+	"the API bound on video0.strip_overlap is the AR9311 one");
 
 static const char *validate_video(const VencConfig *cfg)
 {
@@ -44,6 +46,8 @@ static const char *validate_video(const VencConfig *cfg)
 		return "AR9311 phase one supports video0.slice_count=1 only";
 	if (v->strips > AR9311_STRIPS_MAX)
 		return "AR9311 video0.strips must be 0..4";
+	if (v->strip_overlap > AR9311_STRIPS_OVERLAP_MAX)
+		return "AR9311 video0.strip_overlap must be 0..2";
 	return NULL;
 }
 

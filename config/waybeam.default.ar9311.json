@@ -15,6 +15,7 @@
     "sliceCount": 1,
     "subFrameSync": true,
     "strips": 2,
+    "stripOverlap": 1,
     "resilience": "racing",
     "framing": "off"
   },

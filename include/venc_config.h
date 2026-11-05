@@ -71,6 +71,7 @@ extern "C" {
  * 6, since 7 and 8 both quantize down to 6. */
 #define VENC_SLICE_COUNT_MAX 32
 #define VENC_STRIPS_MAX 4
+#define VENC_STRIP_OVERLAP_MAX 2
 
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
@@ -171,6 +172,11 @@ typedef struct {
 	                            * slices, each sent as soon as it is
 	                            * encoded; 0 (or 1) = one picture, else
 	                            * 2..VENC_STRIPS_MAX.  Needs sub_frame_sync. */
+	uint32_t strip_overlap;    /* AR9311 strips: 64-line rows each strip
+	                            * also encodes past each seam and drops
+	                            * again, so its motion vectors find the
+	                            * neighbour's content there instead of
+	                            * padding; 0..VENC_STRIP_OVERLAP_MAX. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

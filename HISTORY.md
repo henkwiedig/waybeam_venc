@@ -1,5 +1,39 @@
 # History
 
+## [0.95.0] - 2026-11-05
+
+AR9311: **strip overlap, seams that hold up when the picture moves.**
+`contract_version` moves to **0.39.0**.  New `video0.stripOverlap` (uint
+0..2, restart, AR9311 only, default 1): each strip also encodes that many
+64-line rows past each of its seams, and the join drops them.
+
+- A strip's motion vectors past its seam read its encoder's padding, the
+  decoder's the neighbouring strip, and the error spreads until the intra
+  refresh passes.  In a still scene that is invisible; a tilt that moves
+  the picture across a seam (what far scenery does in FPV) spread it over
+  the whole picture on a hand-tilted P1: up to 40 % of a frame's pixels,
+  ~28k a frame off by 8 levels or more, the worst frames 29 dB from what
+  the encoders meant.  With 1 overlap row: 0.4-2.9k, worst frames 36-43
+  dB, the median frame 46 -> 57 dB; what remains comes from moves of more
+  than 64 lines a frame.
+- The rows go as slices of their own (wave5's
+  `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB`, one size per encoder): strip 0
+  sliced after its sent rows, a strip with rows above its seam in slices of
+  `stripOverlap` rows.  `ar9311_merge.c` drops the slices outside the sent
+  rows, checks the cut falls on slice boundaries and renumbers the rest;
+  `ar9311_strips_plan()` gives each strip its encoded and sent rows.  The
+  bitrate is split by encoded lines, so the sent rate stays on target.
+- With the overlap the loop filter runs across slice edges: each encoder
+  deblocks its own (1-row slices left undeblocked showed as lines every 64
+  lines under motion, edge step 2.7-2.9 against 1.2), the decoder deblocks
+  the seam with pixels both encoders had close copies of (no measurable
+  extra drift).  `stripOverlap` 0 keeps the 0.94.0 behaviour.
+- Cost at 1 row: the first part +1.4 ms, the whole picture +1.8 ms after
+  the camera's last line; ~12 % more lines encoded.
+- Host tests: `ar9311_strips_plan()` with overlap, `test_ar9311_merge` on a
+  real P1 overlap recording (strip 0 IDR + P, 2 slices; strip 1, 9
+  slices), a strip whose slices do not fit the overlap is refused.
+
 ## [0.94.0] - 2026-11-04
 
 AR9311: **strips, ~10 ms less displayed latency.**  `contract_version`

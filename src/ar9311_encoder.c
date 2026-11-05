@@ -162,10 +162,17 @@ static int set_rate_control(int fd, const Ar9311EncoderParams *params)
 	if ((params->mirror && set_ctrl(fd, V4L2_CID_HFLIP, 1, "hflip") != 0) ||
 	    (params->flip && set_ctrl(fd, V4L2_CID_VFLIP, 1, "vflip") != 0))
 		return -1;
-	if (params->no_lf_across_slices &&
-	    set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
-		V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY,
+	if (set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
+		params->no_lf_across_slices ?
+		V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY :
+		V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED,
 		"loop_filter_mode") != 0)
+		return -1;
+	if (params->slice_ctus &&
+	    (set_ctrl(fd, V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
+		V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB, "slice_mode") != 0 ||
+	     set_ctrl(fd, V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB,
+		(int32_t)params->slice_ctus, "slice_ctus") != 0))
 		return -1;
 	if (params->min_qp && set_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
 		(int32_t)params->min_qp, "min_qp") != 0)

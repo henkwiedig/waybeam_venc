@@ -17,17 +17,20 @@
  *             from the height), each slice header gets
  *             first_slice_segment_in_pic_flag 0 and its address moved down
  *             by the CTUs of the strips above.
- * Every strip but the last is whole CTU rows with no cropping.
+ * Every strip but the last is whole CTU rows with no cropping.  Rows a strip
+ * codes past a seam (overlap_rows) are slices of their own, which are
+ * dropped; the addresses count only the rows that are sent.
  *
- * All encoders must run in lock step (same pictures, IDRs together), with
- * the loop filter off across slice boundaries (pps_loop_filter_across_
- * slices_enabled_flag 0), so the decoder filters each seam exactly as the
- * encoders treated their picture edges.  What cannot be matched: a motion
- * vector that reads past a strip's edge (its own padding at encode time, the
- * neighbour's pixels at decode time).  Measured on a P1 (still scene, 2..4
- * strips, ~20 Mbit/s): up to ~0.1 % of the picture's pixels differ, by up to
- * 18-38 levels, all within 40 lines of a seam, until the intra refresh wave
- * passes the seam rows again. */
+ * All encoders must run in lock step (same pictures, IDRs together).
+ * Without overlap rows the loop filter must be off across slice boundaries
+ * (pps_loop_filter_across_slices_enabled_flag 0), so the decoder filters
+ * each seam exactly as the encoders treated their picture edges; with them
+ * it may run across, as both sides of a seam are rows both encoders coded.
+ * What cannot be matched: a motion vector that reads past a strip's edge
+ * (its own padding at encode time, the neighbour's pixels at decode time,
+ * or with overlap rows the other encoder's coding of the same rows), so the
+ * picture drifts from the seams until the intra refresh passes; see
+ * ar9311_strips.h for what that measured. */
 
 #define AR9311_MERGE_MAX_STRIPS AR9311_STRIPS_MAX
 #define AR9311_MERGE_MAX_PS 512
@@ -74,6 +77,9 @@ typedef struct {
 	 * exist) */
 	uint32_t coded_h[AR9311_MERGE_MAX_STRIPS];
 	uint32_t conf_bottom;    /* last strip's conformance window, chroma rows */
+	/* CTU rows each strip codes past each of its seams, sliced off and
+	 * dropped here (ar9311_strips.h) */
+	uint32_t overlap_rows;
 	/* last picture of each strip, for the lock-step check */
 	int idr[AR9311_MERGE_MAX_STRIPS];
 	uint32_t poc[AR9311_MERGE_MAX_STRIPS];
@@ -83,9 +89,11 @@ typedef struct {
 	const char *error;       /* last failure, for the log */
 } Ar9311Merge;
 
-/** @p n strips (2..AR9311_MERGE_MAX_STRIPS), @p heights their picture
- *  heights in lines, top to bottom. */
-void ar9311_merge_init(Ar9311Merge *m, int n, const uint32_t *heights);
+/** @p n strips (2..AR9311_MERGE_MAX_STRIPS), @p heights their coded
+ *  picture heights in lines, top to bottom, @p overlap_rows of them past
+ *  each seam. */
+void ar9311_merge_init(Ar9311Merge *m, int n, const uint32_t *heights,
+	uint32_t overlap_rows);
 void ar9311_merge_free(Ar9311Merge *m);
 
 /** Rewrite strip @p k's access unit into @p out (capacity @p cap); strips

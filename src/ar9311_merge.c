@@ -429,6 +429,7 @@ static int parse_pps(const uint8_t *rbsp, size_t len, Ar9311HevcPps *p)
 
 typedef struct {
 	uint32_t first, no_output, pps_id, addr, slice_type, poc_lsb, idr;
+	uint32_t dependent;
 	size_t after_addr_bit;   /* first bit after slice_segment_address */
 	size_t end_bit;          /* first bit of byte_alignment() */
 	size_t data_byte;        /* slice data start */
@@ -453,6 +454,7 @@ static int parse_slice(const uint8_t *rbsp, size_t len,
 			dependent = br_u(&b, 1);
 		h->addr = br_u(&b, ceil_log2(pic_ctbs));
 	}
+	h->dependent = dependent;
 	h->after_addr_bit = b.pos;
 	if (!dependent) {
 		br_u(&b, p->num_extra_bits);
@@ -605,12 +607,14 @@ static int parse_slice(const uint8_t *rbsp, size_t len,
 
 /* ── Merge ────────────────────────────────────────────────────────────── */
 
-void ar9311_merge_init(Ar9311Merge *m, int n, const uint32_t *heights)
+void ar9311_merge_init(Ar9311Merge *m, int n, const uint32_t *heights,
+	uint32_t overlap_rows)
 {
 	int k;
 
 	memset(m, 0, sizeof(*m));
 	m->n = n;
+	m->overlap_rows = overlap_rows;
 	for (k = 0; k < n && k < AR9311_MERGE_MAX_STRIPS; k++) {
 		m->coded_h[k] = heights[k];
 		m->poc[k] = 0xffffffffu;
@@ -648,13 +652,21 @@ static uint32_t ctbs(uint32_t px, uint32_t ctb_log2)
 	return (px + (1u << ctb_log2) - 1) >> ctb_log2;
 }
 
+/* CTU rows strip @p k codes past its seams, both together. */
+static uint32_t overlap_of(const Ar9311Merge *m, int k)
+{
+	return (k > 0 ? m->overlap_rows : 0) +
+		(k < m->n - 1 ? m->overlap_rows : 0);
+}
+
+/* The picture's height: the lines the strips send. */
 static uint32_t full_height(const Ar9311Merge *m)
 {
 	uint32_t h = 0;
 	int k;
 
 	for (k = 0; k < m->n; k++)
-		h += m->coded_h[k];
+		h += m->coded_h[k] - (overlap_of(m, k) << m->sps[0].ctb_log2);
 	return h;
 }
 
@@ -686,7 +698,7 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 {
 	size_t cursor = 0, pos = 0, nal_len, rlen;
 	const uint8_t *nal;
-	int last = k == m->n - 1;
+	int last = k == m->n - 1, kept = 0, cut = 0;
 
 	m->error = NULL;
 	if (k < 0 || k >= m->n)
@@ -707,6 +719,8 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 			if ((s->conf_flag && (s->conf[0] | s->conf[1] | s->conf[2])) ||
 			    (!last && (cb || (s->height & ((1u << s->ctb_log2) - 1)))))
 				return m->error = "strip is not whole CTU rows", 0;
+			if (s->height <= overlap_of(m, k) << s->ctb_log2)
+				return m->error = "strip no taller than its overlap", 0;
 			if (k > 0 && (s->width != m->sps[0].width ||
 			    s->ctb_log2 != m->sps[0].ctb_log2 ||
 			    s->log2_max_poc_lsb != m->sps[0].log2_max_poc_lsb ||
@@ -733,7 +747,9 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 			rlen = unescape(nal, nal_len, m->rbsp);
 			if (!parse_pps(m->rbsp, rlen, &m->pps[k]))
 				return m->error = "PPS not understood", 0;
-			if (m->pps[k].lf_across_slices)
+			/* with overlap rows the seam may be filtered: the rows
+			 * either side are what both encoders filtered with */
+			if (m->pps[k].lf_across_slices && !m->overlap_rows)
 				return m->error = "loop filter crosses slices", 0;
 			if (k == 0) {
 				m->top_pps_len = rlen < AR9311_MERGE_MAX_PS ? rlen : 0;
@@ -759,7 +775,7 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 			const Ar9311HevcSps *s = &m->sps[k];
 			SliceHdr h;
 			const char *why = "slice";
-			uint32_t w_ctb, off_ctbs = 0, full_ctbs;
+			uint32_t w_ctb, rows, keep0, keep1, addr, full_ctbs;
 			int j;
 			Bw w;
 
@@ -767,20 +783,38 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 				return m->error = "slice before its SPS/PPS", 0;
 			rlen = unescape(nal, nal_len, m->rbsp);
 			w_ctb = ctbs(s->width, s->ctb_log2);
+			rows = ctbs(s->height, s->ctb_log2);
 			if (!parse_slice(m->rbsp, rlen, s, &m->pps[k], type,
-				w_ctb * ctbs(s->height, s->ctb_log2), &h, &why))
+				w_ctb * rows, &h, &why))
 				return m->error = why, 0;
+			if (h.dependent)
+				return m->error = "dependent slice segment", 0;
 			m->idr[k] = (int)h.idr;
 			m->poc[k] = h.poc_lsb;
-			if (k == 0) {
-				if (!h.first)
-					return m->error = "strip 0 has more than one slice", 0;
+			/* The rows past the seams go.  The ones kept start and
+			 * end on slice boundaries, or a kept slice would carry
+			 * overlap rows into the picture. */
+			keep0 = k > 0 ? w_ctb * m->overlap_rows : 0;
+			keep1 = w_ctb * (rows - (last ? 0 : m->overlap_rows));
+			if (h.addr < keep0)
+				continue;
+			if (h.addr >= keep1) {
+				if (!cut++ && h.addr != keep1)
+					return m->error = "a slice runs into the overlap", 0;
+				continue;
+			}
+			if (!kept++ && h.addr != keep0)
+				return m->error = "a slice runs into the overlap", 0;
+			addr = h.addr - keep0;
+			for (j = 0; j < k; j++)
+				addr += w_ctb * (ctbs(m->coded_h[j], s->ctb_log2) -
+					overlap_of(m, j));
+			if (!addr) {
+				/* the picture's first slice, as it is */
 				if (put_raw(nal, nal_len, out, cap, &pos))
 					return m->error = "output full", 0;
 				continue;
 			}
-			for (j = 0; j < k; j++)
-				off_ctbs += w_ctb * ctbs(m->coded_h[j], s->ctb_log2);
 			full_ctbs = w_ctb * ctbs(full_height(m), s->ctb_log2);
 			w.p = m->out_rbsp;
 			w.cap = m->scratch_len;
@@ -793,7 +827,7 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 			bw_ue(&w, h.pps_id);
 			if (m->pps[k].dependent_slices)
 				bw_u(&w, 0, 1);		/* an independent slice */
-			bw_u(&w, off_ctbs + h.addr, ceil_log2(full_ctbs));
+			bw_u(&w, addr, ceil_log2(full_ctbs));
 			bw_copy(&w, m->rbsp, h.after_addr_bit, h.end_bit);
 			bw_trailing(&w);		/* byte_alignment() */
 			bw_copy(&w, m->rbsp, h.data_byte * 8, rlen * 8);
@@ -804,6 +838,10 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 		if (put_raw(nal, nal_len, out, cap, &pos))
 			return m->error = "output full", 0;
 	}
+	if (!kept)
+		return m->error = "strip without a slice", 0;
+	if (!last && m->overlap_rows && !cut)
+		return m->error = "a slice runs into the overlap", 0;
 	return pos;
 }
 

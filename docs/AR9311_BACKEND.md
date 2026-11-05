@@ -155,25 +155,47 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
   Every strip but the last is queued at its last band's release time in the
   sub-frame sync schedule (2 strips: the top at +9042 us); the last one
   follows the camera from its first band with sub-frame sync (2 strips:
-  +9990 us).  The bitrate is split by height; IDR requests go to every
+  +9990 us).  The bitrate is split by the lines each strip encodes; IDR
+  requests go to every
   encoder right before a frame's first strip is queued, so all strips turn
   IDR together.  Needs sub-frame sync and a frame-shm output; without either
   waybeam warns and encodes one picture.
 - **Join**: strip 0's SPS gets the full height; the other strips' VPS/SPS/PPS
   are dropped after a check that they match strip 0's, and each slice
   header is rewritten to first_slice_segment_in_pic_flag 0 and its CTU
-  address in the whole picture.  The encoders run with the loop filter off
-  at slice boundaries (`V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY`),
-  so the decoder treats each seam as the encoders treated their picture
-  edges.  A frame whose strips disagree (POC, IDR) or fail to join is given
-  up and both encoders are asked for an IDR.
+  address in the whole picture.  A frame whose strips disagree (POC, IDR)
+  or fail to join is given up and both encoders are asked for an IDR.
 - **Seams are not bit-exact**: a motion vector at a strip's edge (and its
   interpolation taps) reads that encoder's padding while encoding but the
-  neighbouring strip's pixels while decoding.  Measured on recorded P1
-  strips (still scene, ~20 Mbit/s): up to ~0.1 % of the picture's pixels
-  differ, by up to 18-38 levels, all within 40 lines of a seam, until the
-  intra refresh wave passes the seam rows again (racing: every 9 frames).
-  Motion makes it larger.
+  neighbouring strip's pixels while decoding, and the error spreads until
+  the intra refresh wave passes (racing: every 9-10 frames).  In a still
+  scene that is invisible (up to ~0.1 % of the pixels, ~80 dB from what
+  the encoders meant); a tilt that moves the picture across a seam spreads
+  it over the whole picture (hand-tilted P1, 26-44 lines a frame: up to
+  40 % of a frame's pixels, ~28k a frame off by 8 levels or more, worst
+  frames 29 dB).
+- **Overlap** (`video0.stripOverlap`, restart, 0..2, default 1): each strip
+  also encodes that many 64-line rows past each of its seams and the join
+  drops them, so past the seam a motion vector reads the content the
+  decoder has, only coded by the other encoder.  The rows go as slices of
+  their own: strip 0 is sliced after its sent rows (9 + 1), a strip with
+  rows above its seam in slices of `stripOverlap` rows (wave5 cuts slices
+  of one size only, `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB`); the join
+  checks that the cut falls on slice boundaries.  With the overlap the loop
+  filter runs across slice edges (`..._LOOP_FILTER_MODE_ENABLED`): each
+  encoder deblocks its own slice edges, the decoder the seam, with pixels
+  both encoders had close copies of.  Without it the encoders stop the
+  loop filter at slice boundaries (`..._DISABLED_AT_SLICE_BOUNDARY`), so
+  the decoder treats each seam as the encoders treated their picture
+  edges.  Measured on the hand-tilted P1, 1 row against none: pixels off
+  by >= 8 levels ~28k -> 0.4-2.9k a frame, the median frame 46 -> 57 dB
+  from what the encoders meant, the worst 29 -> 36-43 dB; what is left
+  comes in bursts at moves of more than 64 lines a frame (2 rows would
+  cover those).  The CTU-row edges stay as smooth as inside a strip (edge
+  step 1.3-1.6 against 1.2; 2.7-2.9 with 1-row slices and no filtering
+  across them).  Cost: the first part +1.4 ms, the whole picture +1.8 ms
+  after the camera's last line, ~12 % more lines encoded (the bitrate
+  split makes up for the dropped bits).  A still scene gains nothing.
 - **Measured** on a P1 -> VRX Pro at ~22 Mbit/s (PI rate control, 2 x 60 s
   per setting; capture -> ground receiver, PixelPilot latency p50 / p99,
   vsync-lock target, drops per 10 s, tx write time per frame):
@@ -283,7 +305,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.
