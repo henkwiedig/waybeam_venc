@@ -18,6 +18,7 @@
 #include "maruko_pipeline.h"
 #endif
 #if HAVE_BACKEND_AR9311
+#include "ar9311_ae.h"
 #include "ar9311_runtime.h"
 #include "ar9311_validation.h"
 #endif
@@ -37,6 +38,7 @@
 #include "venc_webui.h"
 #include "cJSON.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -4662,19 +4664,28 @@ static int handle_modes(int fd, const HttpRequest *req, void *ctx)
 	free(str);
 	return rc;
 #elif HAVE_BACKEND_AR9311
-	/* The one mode ar9311_validate_config() accepts, in the CV610 shape. */
-	char buf[320];
+	/* The one mode ar9311_validate_config() accepts, in the CV610 shape,
+	 * named after the sensor driver that bound the camera (the P1 is
+	 * fitted with an NT99235 or an SC231AI; both run it on two lanes). */
+	char buf[320], name[16] = "camera";
+	const char *sensor = ar9311_sensor_name();
 	int selected;
+	size_t i;
 
+	if (sensor) {
+		for (i = 0; sensor[i] && i < sizeof(name) - 1; i++)
+			name[i] = (char)toupper((unsigned char)sensor[i]);
+		name[i] = '\0';
+	}
 	pthread_mutex_lock(&g_cfg_mutex);
 	selected = g_sensor_mode;
 	pthread_mutex_unlock(&g_cfg_mutex);
 	snprintf(buf, sizeof(buf), "{\"ok\":true,\"data\":{\"selected_pad\":0,"
 		"\"selected_mode\":%d,\"pads\":[{\"pad\":0,\"modes\":[{"
 		"\"index\":0,\"width\":%d,\"height\":%d,\"min_fps\":%d,"
-		"\"max_fps\":%d,\"desc\":\"NT99235 2-lane\",\"selected\":%s}]}]}}",
+		"\"max_fps\":%d,\"desc\":\"%s 2-lane\",\"selected\":%s}]}]}}",
 		selected, AR9311_WIDTH, AR9311_HEIGHT, AR9311_FPS, AR9311_FPS,
-		selected == 0 ? "true" : "false");
+		name, selected == 0 ? "true" : "false");
 	return httpd_send_json(fd, 200, buf);
 #else
 	pthread_mutex_lock(&g_cfg_mutex);

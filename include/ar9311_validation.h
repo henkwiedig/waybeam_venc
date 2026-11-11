@@ -3,9 +3,10 @@
 
 #include "venc_config.h"
 
-/* The one mode the AR9311 camera chain delivers today: the NT99235's
- * 2-lane 1920x1080p60, the only mode the open CVISP output is validated
- * for (MissingLynk ml-kernel docs/camera-stack.md). */
+/* The one mode the AR9311 camera chain delivers today: 2-lane
+ * 1920x1080p60 from the NT99235 or the SC231AI, the only mode the open
+ * CVISP output is validated for (MissingLynk ml-kernel
+ * docs/camera-stack.md). */
 #define AR9311_WIDTH 1920
 #define AR9311_HEIGHT 1080
 #define AR9311_FPS 60

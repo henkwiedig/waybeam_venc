@@ -1,5 +1,14 @@
 # History
 
+## [0.96.2] - 2026-11-11
+
+AR9311: **the sensor mode names the camera that is fitted.**  No contract
+change.
+
+- `GET /api/v1/modes` reported its one mode as "NT99235 2-lane" whatever
+  sensor bound (PixelPilot shows it under Camera -> Sensor -> Mode); it now
+  names the bound driver, "SC231AI 2-lane" or "NT99235 2-lane".
+
 ## [0.96.1] - 2026-11-11
 
 AR9311: **the NT99235 turns at the sensor too.**  No contract change.
