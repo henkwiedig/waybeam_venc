@@ -932,12 +932,16 @@ static void ar9311_plan_refresh(Ar9311RunnerContext *ctx,
  * comes back as the write starts; off runs depth 2, where it comes back
  * written.  Depth 1 without sub-frame sync would encode torn frames. */
 /* image.mirror / image.flip.  A sensor driver with an orientation parameter
- * (the SC231AI's: bit 0 mirror, bit 1 flip) turns the readout itself; the
- * ISP's Bayer phase stays and the frame still arrives top-down, so strips
- * and sub-frame sync keep working.  Written every start, so a cleared
- * setting also undoes an earlier one.  Otherwise (the NT99235, whose phase
- * the ISP tuning depends on) the encoder turns the picture, and a flip there
- * turns sub-frame sync off (ar9311_plan_sfs). */
+ * (bit 0 mirror, bit 1 flip; both P1 sensors) turns the readout itself, and
+ * the frame still arrives top-down, so strips and sub-frame sync keep
+ * working.  Where that moves the Bayer phase (the NT99235) the driver
+ * reports the new order and the ISP is told to re-read it; the ISP takes it
+ * at chain start anyway, so -EPIPE before then is fine.  Written every start,
+ * so a cleared setting also undoes an earlier one.  Without the parameter the
+ * encoder turns the picture, and a flip there turns sub-frame sync off
+ * (ar9311_plan_sfs). */
+#define AR9311_ISP_BAYER_PATH "/sys/kernel/debug/ar-isp/bayer"
+
 static void ar9311_plan_orientation(Ar9311RunnerContext *ctx,
 	Ar9311EncoderParams *params)
 {
@@ -963,6 +967,11 @@ static void ar9311_plan_orientation(Ar9311RunnerContext *ctx,
 	if (ok) {
 		params->mirror = 0;
 		params->flip = 0;
+		f = fopen(AR9311_ISP_BAYER_PATH, "w");
+		if (f) {
+			fputs("1\n", f);
+			fclose(f);
+		}
 		if (mirror || flip)
 			printf("> [ar9311] picture %s by the %s\n",
 				mirror && flip ? "turned 180 degrees" :

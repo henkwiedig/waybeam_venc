@@ -39,13 +39,14 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   IDR. The camera
   buffer's capture timestamp travels through the encoder to the frame-shm
   `pts`. `image.mirror` / `image.flip` turn the readout at the sensor when
-  its driver has an `orientation` parameter (the SC231AI: the Bayer phase
-  the ISP sees stays in all four orientations and the frame still arrives
-  top-down, so strips and sub-frame sync keep working).  Otherwise (the
-  NT99235, whose phase the ISP tuning depends on) the encoder turns the
-  picture (V4L2 HFLIP/VFLIP, set at open); an encoder flip reads the frame
-  bottom-up, so it turns sub-frame sync and with it strips off, with a
-  warning.
+  its driver has an `orientation` parameter (both P1 sensors, with the
+  builder's kernel patches 0007/0008): the frame still arrives top-down, so
+  strips and sub-frame sync keep working.  The SC231AI keeps its Bayer
+  phase; the NT99235's moves, its driver reports the new order and waybeam
+  has the ISP re-read it (`/sys/kernel/debug/ar-isp/bayer`).  Without the
+  parameter the encoder turns the picture (V4L2 HFLIP/VFLIP, set at open);
+  an encoder flip reads the frame bottom-up, so it turns sub-frame sync and
+  with it strips off, with a warning.
 - **Auto-exposure** (`src/ar9311_ae.c`) and **white balance**
   (`src/ar9311_awb.c`): see below.
 - **Output** (`src/ar9311_runtime.c`): the shared HEVC RTP packetizer over
@@ -367,7 +368,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.awbMode`, `isp.awbCt`, `isp.awbFps` (white balance) | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (both = 180 degrees; at the SC231AI sensor, encoder-side for the NT99235), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (both = 180 degrees; at the sensor, encoder-side on a kernel without the orientation parameter), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.

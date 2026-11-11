@@ -1,5 +1,19 @@
 # History
 
+## [0.96.1] - 2026-11-11
+
+AR9311: **the NT99235 turns at the sensor too.**  No contract change.
+
+- With the builder's kernel patch 0008 the NT99235 driver has an
+  `orientation` parameter like the SC231AI's, so `image.mirror` /
+  `image.flip` (PixelPilot's rotate 180) turn its readout instead of the
+  encoder, and sub-frame sync and strips keep running.  Its Bayer phase
+  moves with each bit (measured: mirrored GRBG, flipped GBRG, 180 BGGR);
+  the driver reports it and waybeam has the ISP re-read the order through
+  `/sys/kernel/debug/ar-isp/bayer` after setting the orientation.  On a P1:
+  all four orientations in their own colours at 60 fps, air latency
+  unchanged (the encoder fallback cost ~6 ms).
+
 ## [0.96.0] - 2026-11-11
 
 AR9311: **the SC231AI camera, and white balance.**  `contract_version`
