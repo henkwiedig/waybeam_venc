@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-/* Auto-exposure for the AR9311 camera (NT99235 + Artosyn ISP on the
- * MissingLynk drivers).  The ISP meters the frame into a zone grid; a thread
+/* Auto-exposure for the AR9311 camera (NT99235 or SC231AI + Artosyn ISP on
+ * the MissingLynk drivers).  The ISP meters the frame into a zone grid; a thread
  * here turns that into sensor integration time and analogue gain, written
  * through the sensor driver's module parameters, and keeps the ISP's
  * gain-keyed denoise stages in step with the applied gain.
@@ -31,7 +31,8 @@
 /* Sensor analogue gain code range (gain = 2^(code>>4) * (16 + (code&15)) / 16,
  * 1x at 0x00 to 64x at 0x60; nt99235 driver). */
 #define AR9311_AE_GAIN_CODE_MAX 0x60
-/* 1080p60 frame: 1125 lines, integration up to 1123 (sensor driver clamp). */
+/* 1080p60 frame: 1125 lines, integration up to 1123 (NT99235 driver clamp;
+ * the SC231AI's is lower, see ar9311_ae.c). */
 #define AR9311_AE_LINES_MAX 1123u
 #define AR9311_AE_LINE_NS 14815u   /* (1 s / 60) / 1125 lines */
 /* Default metered-luma target, 0..255 in the linear sensor domain. */
@@ -67,9 +68,17 @@ uint32_t ar9311_ae_target_for_ev(double ev);
 /** Gain of a sensor gain code, Q10. */
 uint32_t ar9311_ae_gain_q10(unsigned code);
 
+/* The Bayer channels of a zone the meter averages, bit n for channel n.
+ * The NT99235 meters all four.  The SC231AI's greens are channels 0 and 3;
+ * its red and blue sit well below green until the ISP's white balance
+ * lifts them, so an average over all four would overexpose it. */
+#define AR9311_AE_METER_ALL 0xfu
+#define AR9311_AE_METER_GREEN_03 0x9u
+
 /** Meter one RRO grid (the stats snapshot without its leading sequence
- *  word).  Returns 0, or -1 for a grid with no pixel counts. */
-int ar9311_ae_meter(const uint8_t *rro, Ar9311AeMeter *out);
+ *  word) over @p channels (AR9311_AE_METER_*; 0 means all four).  Returns
+ *  0, or -1 for a grid with no pixel counts. */
+int ar9311_ae_meter(const uint8_t *rro, unsigned channels, Ar9311AeMeter *out);
 
 /** Operating point for a total exposure in line-gain units (lines x gain).
  *  Integration time first, then the largest gain code that does not
@@ -107,5 +116,16 @@ char *ar9311_ae_status_json(Ar9311Ae *ae);
 
 /** Stop and join the thread, free @p ae.  NULL is fine. */
 void ar9311_ae_stop(Ar9311Ae *ae);
+
+/* ── Shared with the AWB ─────────────────────────────────────────────── */
+
+/** Read one coherent statistics snapshot (AR9311_AE_STATS_SIZE bytes) into
+ *  @p buf and its flip sequence into @p seq.  0, or -1 when the driver has
+ *  none yet or a flip landed mid-copy. */
+int ar9311_stats_read(uint8_t *buf, uint32_t *seq);
+
+/** Name of the camera sensor driver that bound the camera ("nt99235",
+ *  "sc231ai"), or NULL. */
+const char *ar9311_sensor_name(void);
 
 #endif /* AR9311_AE_H */

@@ -1,5 +1,6 @@
 #include "ar9311_ae.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -12,8 +13,52 @@
 
 #define AE_STATS_PATH "/sys/kernel/debug/ar-isp/stats_raw"
 #define AE_LADDER_ARM "/sys/kernel/debug/ar-isp/ladders"
-#define AE_SENSOR_EXPOSURE "/sys/module/nt99235/parameters/exposure"
-#define AE_SENSOR_GAIN "/sys/module/nt99235/parameters/gain"
+/* The P1 is built with an NT99235 or an SC231AI camera.  Both drivers take
+ * exposure (lines) and gain (the same code scale) as writable module
+ * parameters; the AE drives whichever one bound the camera node, within
+ * that driver's integration clamp and metering the channels that track
+ * its brightness.
+ *
+ * The target scales with the sensor's tone curve: the SC231AI's tuning
+ * gamma is bright (its test pattern measured raw 14 % -> 148, 69 % -> 253,
+ * mid-grey near raw 10 %), so the same metered target as the NT99235
+ * overexposed it by a stop and clipped highlights early.  Exposure
+ * compensation stays relative: 0 EV is the sensor's own target. */
+typedef struct {
+	const char *name;
+	uint32_t lines_max;
+	unsigned channels;      /* AR9311_AE_METER_* */
+	unsigned target_q8;     /* scale on the metered target, 256 = 1x */
+} AeSensor;
+
+static const AeSensor g_ae_sensors[] = {
+	{ "nt99235", AR9311_AE_LINES_MAX, AR9311_AE_METER_ALL, 256u },
+	{ "sc231ai", 1114u, AR9311_AE_METER_GREEN_03, 128u },   /* 1125 - 11 lines */
+};
+static const AeSensor *g_ae_sensor;
+static char g_ae_exposure_path[64];
+static char g_ae_gain_path[64];
+#define AE_SENSOR_EXPOSURE g_ae_exposure_path
+#define AE_SENSOR_GAIN g_ae_gain_path
+
+/* The config's limits for the bound sensor: within its integration clamp,
+ * so the AE never counts on lines the driver would cut, and with the target
+ * scaled to its tone curve. */
+static Ar9311AeLimits sensor_limits(const Ar9311AeLimits *limits)
+{
+	Ar9311AeLimits lim = *limits;
+
+	if (!g_ae_sensor)
+		return lim;
+	if (lim.lines_max > g_ae_sensor->lines_max)
+		lim.lines_max = g_ae_sensor->lines_max;
+	if (lim.lines_min > lim.lines_max)
+		lim.lines_min = lim.lines_max;
+	lim.target = (lim.target * g_ae_sensor->target_q8 + 128u) / 256u;
+	if (lim.target < 1)
+		lim.target = 1;
+	return lim;
+}
 
 /* ISP stages whose strength the driver looks up by sensor gain (Q8,
  * 256 = 1x): raw and luma noise reduction, 3D denoise, demosaic and chroma
@@ -64,12 +109,17 @@ static int zone_weight(unsigned col, unsigned row)
 		row >= AR9311_AE_ROWS / 4 && row < AR9311_AE_ROWS * 3 / 4) ? 2 : 1;
 }
 
-int ar9311_ae_meter(const uint8_t *rro, Ar9311AeMeter *out)
+int ar9311_ae_meter(const uint8_t *rro, unsigned channels, Ar9311AeMeter *out)
 {
 	double sum = 0.0;
-	unsigned weights = 0;
+	unsigned weights = 0, metered = 0;
 	unsigned col, row, ch;
 
+	channels &= AR9311_AE_METER_ALL;
+	if (channels == 0)
+		channels = AR9311_AE_METER_ALL;
+	for (ch = 0; ch < AR9311_AE_CHANNELS; ch++)
+		metered += (channels >> ch) & 1u;
 	out->luma = 0.0f;
 	out->saturated = 0;
 	for (col = 0; col < AR9311_AE_COLS; col++) {
@@ -86,8 +136,9 @@ int ar9311_ae_meter(const uint8_t *rro, Ar9311AeMeter *out)
 			int w = zone_weight(col, row);
 
 			for (ch = 0; ch < AR9311_AE_CHANNELS; ch++)
-				zone_sum += get_le32(zone + ch * 4);
-			mean = (float)(zone_sum / AR9311_AE_CHANNELS / count);
+				if (channels & (1u << ch))
+					zone_sum += get_le32(zone + ch * 4);
+			mean = (float)(zone_sum / metered / count);
 			if (mean >= AE_CLIP_LUMA)
 				out->saturated++;
 			sum += (double)mean * w;
@@ -258,6 +309,7 @@ struct Ar9311Ae {
 	pthread_mutex_t lock;
 	int stop;
 	uint32_t period_us;
+	unsigned channels;   /* the bound sensor's AR9311_AE_METER_* */
 	Ar9311AeLimits limits;
 	/* Status, under lock. */
 	Ar9311AeMeter meter;
@@ -311,7 +363,7 @@ static int read_int(const char *path, long *value)
 
 /* One coherent snapshot: the driver refuses (EAGAIN) until statistics exist
  * and a flip can land mid-copy, which the two sequence words expose. */
-static int read_stats(uint8_t *buf, uint32_t *seq)
+int ar9311_stats_read(uint8_t *buf, uint32_t *seq)
 {
 	int fd = open(AE_STATS_PATH, O_RDONLY | O_CLOEXEC);
 	size_t got = 0;
@@ -366,10 +418,10 @@ static void decide(Ar9311Ae *ae, const uint8_t *stats)
 	double exposure;
 	int moved;
 
-	if (ar9311_ae_meter(stats + 4, &meter) != 0)
+	if (ar9311_ae_meter(stats + 4, ae->channels, &meter) != 0)
 		return;
 	pthread_mutex_lock(&ae->lock);
-	lim = ae->limits;
+	lim = sensor_limits(&ae->limits);
 	exposure = ae->exposure;
 	prev = ae->point;
 	pthread_mutex_unlock(&ae->lock);
@@ -408,7 +460,8 @@ static void *ae_thread(void *opaque)
 		 * shown the last change yet, so deciding again would double
 		 * it.  Missing statistics (before the first frame, after an
 		 * ISP reconfigure) are simply waited out. */
-		if (read_stats(buf, &seq) != 0 || (have_seq && seq == last_seq))
+		if (ar9311_stats_read(buf, &seq) != 0 ||
+		    (have_seq && seq == last_seq))
 			continue;
 		last_seq = seq;
 		have_seq = 1;
@@ -418,11 +471,68 @@ static void *ae_thread(void *opaque)
 	return NULL;
 }
 
+/* Has the i2c driver @p name bound a device?  Its sysfs directory then holds
+ * a link named after the client ("0-001a"). */
+static int sensor_bound(const char *name)
+{
+	char dir[64];
+	struct dirent *de;
+	DIR *d;
+	int bound = 0;
+
+	snprintf(dir, sizeof(dir), "/sys/bus/i2c/drivers/%s", name);
+	d = opendir(dir);
+	if (!d)
+		return 0;
+	while (!bound && (de = readdir(d)) != NULL)
+		bound = de->d_name[0] >= '0' && de->d_name[0] <= '9' &&
+			strchr(de->d_name, '-') != NULL;
+	closedir(d);
+	return bound;
+}
+
+/* Point the sensor paths at the bound sensor's parameters.  0, or -1 when
+ * no supported sensor driver has bound. */
+static int find_sensor(void)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(g_ae_sensors) / sizeof(g_ae_sensors[0]); i++) {
+		const AeSensor *s = &g_ae_sensors[i];
+
+		if (!sensor_bound(s->name))
+			continue;
+		snprintf(g_ae_exposure_path, sizeof(g_ae_exposure_path),
+			"/sys/module/%s/parameters/exposure", s->name);
+		snprintf(g_ae_gain_path, sizeof(g_ae_gain_path),
+			"/sys/module/%s/parameters/gain", s->name);
+		g_ae_sensor = s;
+		printf("> [ar9311] AE drives the %s\n", s->name);
+		return 0;
+	}
+	return -1;
+}
+
+const char *ar9311_sensor_name(void)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(g_ae_sensors) / sizeof(g_ae_sensors[0]); i++)
+		if (sensor_bound(g_ae_sensors[i].name))
+			return g_ae_sensors[i].name;
+	return NULL;
+}
+
 Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz)
 {
 	Ar9311Ae *ae;
 	long lines, code;
 
+	if (find_sensor() != 0) {
+		fprintf(stderr, "WARN: [ar9311] AE disabled: no bound camera "
+			"sensor (nt99235, sc231ai)\n");
+		return NULL;
+	}
 	if (read_int(AE_SENSOR_EXPOSURE, &lines) != 0 ||
 	    read_int(AE_SENSOR_GAIN, &code) != 0 ||
 	    access(AE_STATS_PATH, R_OK) != 0) {
@@ -435,6 +545,7 @@ Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz)
 		return NULL;
 	pthread_mutex_init(&ae->lock, NULL);
 	ae->limits = *limits;
+	ae->channels = g_ae_sensor->channels;
 	ae->period_us = 1000000u / (rate_hz < 1 ? 1 : rate_hz > 30 ? 30 : rate_hz);
 	ae->point.lines = (uint32_t)lines;
 	ae->point.gain_code = (unsigned)code;
@@ -445,7 +556,7 @@ Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz)
 		return NULL;
 	}
 	printf("> [ar9311] AE running at %u Hz, target luma %u\n",
-		1000000u / ae->period_us, limits->target);
+		1000000u / ae->period_us, sensor_limits(limits).target);
 	return ae;
 }
 
@@ -470,9 +581,12 @@ char *ar9311_ae_status_json(Ar9311Ae *ae)
 	char buf[512];
 	int pos;
 
+	Ar9311AeLimits lim;
+
 	if (!ae)
 		return NULL;
 	pthread_mutex_lock(&ae->lock);
+	lim = sensor_limits(&ae->limits);   /* what the AE actually uses */
 	pos = snprintf(buf, sizeof(buf), "{\"ok\":true,\"data\":{"
 		"\"engine\":\"ar9311\",\"statsLive\":%s,\"luma\":%.1f,"
 		"\"target\":%u,\"saturatedZones\":%u,\"lines\":%u,"
@@ -481,12 +595,11 @@ char *ar9311_ae_status_json(Ar9311Ae *ae)
 		"\"limits\":{\"linesMin\":%u,\"linesMax\":%u,"
 		"\"gainMin\":%u,\"gainMax\":%u}}}",
 		ae->have_stats ? "true" : "false", (double)ae->meter.luma,
-		ae->limits.target, ae->meter.saturated, ae->point.lines,
+		lim.target, ae->meter.saturated, ae->point.lines,
 		(unsigned)((uint64_t)ae->point.lines * AR9311_AE_LINE_NS / 1000u),
 		ae->point.gain_code, ar9311_ae_gain_q10(ae->point.gain_code),
-		ae->decisions, ae->moves, ae->limits.flicker_hz, ae->limits.lines_min,
-		ae->limits.lines_max, ae->limits.gain_min_q10,
-		ae->limits.gain_max_q10);
+		ae->decisions, ae->moves, lim.flicker_hz, lim.lines_min,
+		lim.lines_max, lim.gain_min_q10, lim.gain_max_q10);
 	pthread_mutex_unlock(&ae->lock);
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;

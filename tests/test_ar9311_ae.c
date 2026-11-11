@@ -41,6 +41,26 @@ static void make_grid(uint8_t *rro, unsigned level, unsigned bright)
 	}
 }
 
+/* Divide the sums of the channels in @p mask by @p div in every zone. */
+static void scale_channels(uint8_t *rro, unsigned mask, unsigned div)
+{
+	unsigned col, row, ch;
+
+	for (col = 0; col < AR9311_AE_COLS; col++) {
+		uint8_t *sums = rro + col * AR9311_AE_COL_STRIDE + AR9311_AE_BLOCK;
+
+		for (row = 0; row < AR9311_AE_ROWS; row++)
+			for (ch = 0; ch < AR9311_AE_CHANNELS; ch++) {
+				uint8_t *p = sums + (row * AR9311_AE_CHANNELS + ch) * 4;
+				uint32_t v = (uint32_t)p[0] | (uint32_t)p[1] << 8 |
+					(uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+
+				if (mask & (1u << ch))
+					put_le32(p, v / div);
+			}
+	}
+}
+
 static Ar9311AeLimits default_limits(void)
 {
 	Ar9311AeLimits lim = { 1, AR9311_AE_LINES_MAX, AR9311_AE_GAIN_ONE,
@@ -63,13 +83,27 @@ static int test_gain_and_meter(void)
 		ar9311_ae_gain_q10(0x7f) == 65536);
 
 	make_grid(rro, 80, 0);
-	f += expect("meter flat grid", ar9311_ae_meter(rro, &m) == 0 &&
+	f += expect("meter flat grid",
+		ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m) == 0 &&
 		fabsf(m.luma - 80.0f) < 0.01f && m.saturated == 0);
 	make_grid(rro, 40, 64);
 	f += expect("meter counts clipped zones",
-		ar9311_ae_meter(rro, &m) == 0 && m.saturated == 64);
+		ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m) == 0 &&
+		m.saturated == 64);
+	/* SC231AI-like zones: greens (0, 3) at 100, red and blue at 50. */
+	make_grid(rro, 100, 0);
+	scale_channels(rro, 0x6u, 2);
+	f += expect("meter averages all four channels",
+		ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m) == 0 &&
+		fabsf(m.luma - 75.0f) < 0.01f);
+	f += expect("meter on green only",
+		ar9311_ae_meter(rro, AR9311_AE_METER_GREEN_03, &m) == 0 &&
+		fabsf(m.luma - 100.0f) < 0.01f);
+	f += expect("meter treats no channels as all",
+		ar9311_ae_meter(rro, 0, &m) == 0 && fabsf(m.luma - 75.0f) < 0.01f);
 	memset(rro, 0, sizeof(rro));
-	f += expect("meter rejects an empty grid", ar9311_ae_meter(rro, &m) != 0);
+	f += expect("meter rejects an empty grid",
+		ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m) != 0);
 	return f;
 }
 
@@ -119,7 +153,7 @@ static int converge(double k, double *exposure, int *steps)
 		Ar9311AePoint p;
 
 		make_grid(rro, luma > 255 ? 255u : (unsigned)luma, 0);
-		ar9311_ae_meter(rro, &m);
+		ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m);
 		quiet = ar9311_ae_step(exposure, &m, &lim) ? 0 : quiet + 1;
 		p = ar9311_ae_split(*exposure, &lim);
 		*exposure = ar9311_ae_exposure_of(&p);
@@ -137,7 +171,7 @@ static int test_step(void)
 	int steps, f = 0;
 
 	make_grid(rro, AR9311_AE_TARGET + 2, 0);
-	ar9311_ae_meter(rro, &m);
+	ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m);
 	f += expect("deadband holds near target",
 		ar9311_ae_step(&e, &m, &lim) == 0 && e == 1000.0);
 
@@ -154,7 +188,7 @@ static int test_step(void)
 		fabs(e - AR9311_AE_LINES_MAX * 64.0) < 1.0);
 
 	make_grid(rro, 30, 200);   /* a third of the frame clipped */
-	ar9311_ae_meter(rro, &m);
+	ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m);
 	e = 5000.0;
 	ar9311_ae_step(&e, &m, &lim);
 	f += expect("clipped highlights pull exposure down", e < 5000.0);
@@ -224,7 +258,7 @@ static int test_flicker(void)
 			double luma = e * (AR9311_AE_TARGET / 30000.0);
 
 			make_grid(rro, luma > 255 ? 255u : (unsigned)luma, 0);
-			ar9311_ae_meter(rro, &m);
+			ar9311_ae_meter(rro, AR9311_AE_METER_ALL, &m);
 			ar9311_ae_step(&e, &m, &lim);
 			p = ar9311_ae_split(e, &lim);
 			e = ar9311_ae_exposure_of(&p);

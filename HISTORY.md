@@ -1,5 +1,46 @@
 # History
 
+## [0.96.0] - 2026-11-11
+
+AR9311: **the SC231AI camera, and white balance.**  `contract_version`
+moves to **0.40.0**: `isp.awbMode`, `isp.awbCt` and `isp.awbFps` are
+supported and live on AR9311.
+
+- BetaFPV fits the P1 with an NT99235 or an SmartSens SC231AI.
+  `load-ar9311-camera` loads the sensor drivers in turn until one binds
+  (one device-tree node names both; each reads its chip ID at probe), then
+  the chain with that sensor's ISP tuning file and, for the SC231AI,
+  daylight white balance gains to start from.  Needs the OpenIPC builder's
+  P1 kernel patch 0007 (SC231AI driver, RAW10 capture).
+- AE: per sensor.  The SC231AI meters on its two greens (its raw red and
+  blue sit well below green until the white balance lifts them, so a
+  four-channel mean overexposed it), integrates up to 1114 lines and aims
+  a stop lower (metered 28 at 0 EV): its tuning gamma maps raw 10 % to
+  mid-grey and clips at raw 70 %, measured with the sensor's test pattern,
+  so the NT99235's target washed it out.  The NT99235 keeps its
+  four-channel mean, 1123 lines and 56.
+- AWB (`src/ar9311_awb.c`, new): the ISP's zone statistics are raw and
+  everything after its white balance stage is colour-neutral, so neutral
+  gains are green/red and green/blue of a neutral surface.  Each frame the
+  zones whose colour lies on the sensor's illuminant line (calibrated from
+  two lights, warm lamp and D65) count as neutral; their brightness-weighted
+  position on the line gives the gains, approached 15 % per decision.
+  Coloured objects sit off the line and do not pull it.  `ct_manual` fixes
+  it at `isp.awbCt`.  On a P1 under a warm lamp it settles at 309/960
+  (2755 K) where a white wall reads neutral; the loader's fixed daylight
+  gains had rendered that room red-orange.  The NT99235 has no calibration
+  yet and keeps its gains (`/api/v1/awb` reports `"mode":"off"`).
+- `image.mirror` / `image.flip` (PixelPilot's rotate 180) broke the video
+  with strips and sub-frame sync on: the encoder's vertical flip reads the
+  frame bottom-up.  The SC231AI now turns its readout instead (its driver's
+  live `orientation` parameter; the Bayer phase stays in all four
+  orientations, measured), so strips and sub-frame sync keep running.  An
+  encoder flip (the NT99235) now turns sub-frame sync and strips off with a
+  warning instead of encoding garbage.
+- The zone grid is 36 blocks down the frame and 16 zones across, the other
+  way round from the driver header; documented, and the AE's centre
+  weighting is unaffected.
+
 ## [0.95.0] - 2026-11-05
 
 AR9311: **strip overlap, seams that hold up when the picture moves.**

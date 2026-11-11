@@ -957,7 +957,8 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 		return 0;
 
 	/* AR9311: exactly the fields ar9311_runtime.c reads (the isp.* ones are
-	 * the AE limits and rate, ar9311_ae.c).  Everything else -- ISP tuning,
+	 * the AE limits and rate, ar9311_ae.c, and the white balance mode and
+	 * rate, ar9311_awb.c).  Everything else -- ISP tuning,
 	 * audio, recording, snapshot, ROI, resilience, slicing -- is not
 	 * implemented there, so it is advertised unsupported and rejected before
 	 * mutation rather than accepted and ignored. */
@@ -972,6 +973,7 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"isp.gain_max", "isp.gain_min",
 			"isp.shutter_max_us", "isp.shutter_min_us", "isp.ae_fps",
 			"isp.anti_flicker_hz",
+			"isp.awb_mode", "isp.awb_ct", "isp.awb_fps",
 			"image.mirror", "image.flip",
 			"outgoing.enabled", "outgoing.server",
 			"outgoing.max_payload_size", "outgoing.connected_udp",

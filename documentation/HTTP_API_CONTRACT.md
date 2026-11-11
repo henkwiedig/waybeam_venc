@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.39.0`
+- `contract_version`: `0.40.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -44,7 +44,7 @@
 | `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
 | `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before), **/ `video0.fpsDivisor` from 0.85.0** |
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
-| `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** |
+| `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** (AR9311: `isp.awbMode` / `isp.awbCt` / `isp.awbFps` true and live, **from 0.40.0**) |
 | `isp.antiFlickerHz` | **false** | **false** | **false** (AR9311 only, **from 0.35.0**) |
 | `video0.subFrameSync` | **false** | **false** | **false** (AR9311 only, **from 0.37.0**) |
 | `video0.strips` | **false** | **false** | **false** (AR9311 only, **from 0.38.0**) |
@@ -115,8 +115,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.95.0",
-    "contract_version": "0.39.0",
+    "app_version": "0.96.0",
+    "contract_version": "0.40.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -2064,6 +2064,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.40.0` (additive — white balance on AR9311): `isp.awbMode` (`auto` / `ct_manual`), `isp.awbCt` (kelvin) and `isp.awbFps` (`0` stops the loop) become supported and live on AR9311, driving waybeam's own AWB for the SC231AI camera (raw zone statistics, neutral zones on the sensor's illuminant line).  `GET /api/v1/awb` on AR9311 returns `{"engine":"ar9311","sensor","mode","gains":{"red","green","blue"},"estimate":{"live","zones","rg","bg","ct"},"decisions","moves"}`, or `{"engine":"ar9311","mode":"off"}` when the loop is not running (`isp.awbFps` 0, or a sensor without a colour calibration such as the NT99235).  See the AR9311 backend notes (`docs/AR9311_BACKEND.md`, "White balance").
 - `0.39.0` (additive — strip overlap on AR9311): adds `video0.stripOverlap` (`video0.strip_overlap`), uint `0`..`2`, default `1`, restart-required, persisted. Each strip encodes that many 64-line rows past each seam and the join drops them; with it the loop filter runs across slice edges. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".
 - `0.38.0` (additive — strips on AR9311): adds `video0.strips`, uint `0`..`4`, default `0` (`2` in the AR9311 default config), restart-required, persisted. The frame is encoded as N strips on N wave5 instances, joined into one picture of N slices and published on frame-SHM slice by slice (`VENC_FRAME_FLAG_PARTIAL`); needs sub-frame sync and a frame-SHM output, else one picture with a warning. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".
 - `0.37.0` (additive — sub-frame sync on AR9311): adds `video0.subFrameSync` (`video0.sub_frame_sync`), bool, default `false` (`true` in the AR9311 default config), restart-required, persisted. The wave5 encoder takes each camera frame while it is written (CVISP depth 1, rows released from the frame's timestamp); needs the builder's wave5 and CVISP kernel patches, else it stays off with a warning. The frame-SHM `pts` keeps its meaning. `supported:false` on Star6E, Maruko and CV610. See "`video0.subFrameSync` (AR9311) — Sub-Frame Sync".

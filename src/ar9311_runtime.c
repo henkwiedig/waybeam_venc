@@ -1,6 +1,7 @@
 #include "ar9311_runtime.h"
 
 #include "ar9311_ae.h"
+#include "ar9311_awb.h"
 #include "ar9311_capture.h"
 #include "ar9311_encoder.h"
 #include "ar9311_iq.h"
@@ -49,6 +50,7 @@ typedef struct {
 	Ar9311Encoder encoder;
 	int held;                 /* camera buffers out with the encoder */
 	Ar9311Ae *ae;             /* NULL when AE could not start */
+	Ar9311Awb *awb;           /* NULL when off or the sensor has no calibration */
 
 	int socket_handle;
 	struct sockaddr_storage destination;
@@ -481,6 +483,57 @@ static char *ar9311_query_ae_info(void)
 	return g_ar9311_runner ? ar9311_ae_status_json(g_ar9311_runner->ae) : NULL;
 }
 
+/* ── White balance ───────────────────────────────────────────────────── */
+
+/* isp.awbMode ct_manual fixes the balance at isp.awbCt; auto follows the
+ * light.  isp.awbFps 0 leaves the gains the camera loader set. */
+static uint32_t ar9311_awb_manual_ct(const VencConfigIsp *isp)
+{
+	return strcmp(isp->awb_mode, "ct_manual") == 0 ? isp->awb_ct : 0;
+}
+
+static void ar9311_awb_begin(Ar9311RunnerContext *ctx)
+{
+	if (ctx->config.isp.awb_fps)
+		ctx->awb = ar9311_awb_start(ctx->config.isp.awb_fps,
+			ar9311_awb_manual_ct(&ctx->config.isp));
+}
+
+static int ar9311_apply_awb_rate(uint32_t hz)
+{
+	Ar9311RunnerContext *ctx = g_ar9311_runner;
+
+	(void)hz;   /* already committed to the config */
+	if (!ctx)
+		return -1;
+	ar9311_awb_stop(ctx->awb);
+	ctx->awb = NULL;
+	ar9311_awb_begin(ctx);
+	return ctx->config.isp.awb_fps && !ctx->awb ? -1 : 0;
+}
+
+static int ar9311_apply_awb_mode(int mode, uint32_t ct)
+{
+	Ar9311RunnerContext *ctx = g_ar9311_runner;
+
+	if (!ctx || (!ctx->awb && ctx->config.isp.awb_fps))
+		return -1;
+	ar9311_awb_set_mode(ctx->awb, mode == 1 ? ct : 0);
+	return 0;
+}
+
+static char *ar9311_query_awb_info(void)
+{
+	if (!g_ar9311_runner)
+		return NULL;
+	/* Off (awbFps 0, or no calibration for this sensor) is a state, not
+	 * a failure: the gains are the ones the camera loader set. */
+	if (!g_ar9311_runner->awb)
+		return strdup("{\"ok\":true,\"data\":{\"engine\":\"ar9311\","
+			"\"mode\":\"off\"}}");
+	return ar9311_awb_status_json(g_ar9311_runner->awb);
+}
+
 static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.apply_bitrate = ar9311_apply_bitrate,
 	.apply_verbose = ar9311_apply_verbose,
@@ -498,6 +551,9 @@ static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.query_iq_info = ar9311_query_iq_info,
 	.apply_iq_param = ar9311_apply_iq_param,
 	.query_ae_info = ar9311_query_ae_info,
+	.query_awb_info = ar9311_query_awb_info,
+	.apply_awb_mode = ar9311_apply_awb_mode,
+	.apply_awb_rate = ar9311_apply_awb_rate,
 };
 
 /* ── Output ──────────────────────────────────────────────────────────── */
@@ -875,12 +931,60 @@ static void ar9311_plan_refresh(Ar9311RunnerContext *ctx,
  * CVISP depth per stream) and runs the camera at depth 1, where a buffer
  * comes back as the write starts; off runs depth 2, where it comes back
  * written.  Depth 1 without sub-frame sync would encode torn frames. */
+/* image.mirror / image.flip.  A sensor driver with an orientation parameter
+ * (the SC231AI's: bit 0 mirror, bit 1 flip) turns the readout itself; the
+ * ISP's Bayer phase stays and the frame still arrives top-down, so strips
+ * and sub-frame sync keep working.  Written every start, so a cleared
+ * setting also undoes an earlier one.  Otherwise (the NT99235, whose phase
+ * the ISP tuning depends on) the encoder turns the picture, and a flip there
+ * turns sub-frame sync off (ar9311_plan_sfs). */
+static void ar9311_plan_orientation(Ar9311RunnerContext *ctx,
+	Ar9311EncoderParams *params)
+{
+	int mirror = ctx->config.image.mirror ? 1 : 0;
+	int flip = ctx->config.image.flip ? 1 : 0;
+	const char *sensor = ar9311_sensor_name();
+	char path[96];
+	FILE *f;
+	int ok;
+
+	params->mirror = mirror;
+	params->flip = flip;
+	if (!sensor)
+		return;
+	snprintf(path, sizeof(path), "/sys/module/%s/parameters/orientation",
+		sensor);
+	f = fopen(path, "w");
+	if (!f)
+		return;   /* no such parameter: the encoder turns it */
+	ok = fprintf(f, "%d\n", mirror | flip << 1) > 0;
+	if (fclose(f) != 0)
+		ok = 0;
+	if (ok) {
+		params->mirror = 0;
+		params->flip = 0;
+		if (mirror || flip)
+			printf("> [ar9311] picture %s by the %s\n",
+				mirror && flip ? "turned 180 degrees" :
+				mirror ? "mirrored" : "flipped", sensor);
+		return;
+	}
+	fprintf(stderr, "WARNING: [ar9311] %s: %s; turning the picture in the "
+		"encoder\n", path, strerror(errno));
+}
+
 static void ar9311_plan_sfs(Ar9311RunnerContext *ctx,
 	Ar9311EncoderParams *params)
 {
 	int on = ctx->config.video0.sub_frame_sync;
 
 	ctx->pts_offset_us = 0;
+	if (on && params->flip) {
+		fprintf(stderr, "WARNING: [ar9311] image.flip turns the picture in "
+			"the encoder, which reads the frame bottom-up; sub-frame "
+			"sync and strips cannot follow that, running without\n");
+		on = 0;
+	}
 	if (on && !ar9311_encoder_has_sfs()) {
 		fprintf(stderr, "WARNING: [ar9311] video0.subFrameSync: this "
 			"kernel's wave5 has no sub-frame sync (builder patch "
@@ -1362,8 +1466,7 @@ static int ar9311_pipeline_start(Ar9311RunnerContext *ctx)
 		ctx->config.video0.gop_size, AR9311_FPS);
 	params.min_qp = ctx->config.video0.min_qp;
 	params.max_qp = ctx->config.video0.max_qp;
-	params.mirror = ctx->config.image.mirror;
-	params.flip = ctx->config.image.flip;
+	ar9311_plan_orientation(ctx, &params);
 	ar9311_plan_refresh(ctx, &params);
 	ar9311_plan_sfs(ctx, &params);
 	if (ctx->strips)
@@ -1400,6 +1503,8 @@ static int ar9311_init(void *opaque)
 		ar9311_ae_limits_from(&ctx->config.isp, &lim);
 		ctx->ae = ar9311_ae_start(&lim, ctx->config.isp.ae_fps);
 	}
+	/* Non-fatal: without AWB the gains stay as the camera loader set them. */
+	ar9311_awb_begin(ctx);
 	/* Non-fatal too: the tuned picture, which also undoes what an earlier
 	 * daemon left in the ISP driver's parameters. */
 	{
@@ -1554,9 +1659,11 @@ static void ar9311_teardown(void *opaque)
 	venc_httpd_pause();
 	venc_httpd_stop();
 	g_ar9311_runner = NULL;
-	/* Before the camera stops: the thread reads its statistics. */
+	/* Before the camera stops: the threads read its statistics. */
 	ar9311_ae_stop(ctx->ae);
 	ctx->ae = NULL;
+	ar9311_awb_stop(ctx->awb);
+	ctx->awb = NULL;
 	if (ctx->strips && ctx->encoder.streaming)
 		ar9311_strips_teardown(ctx);
 	else if (ctx->encoder.streaming)

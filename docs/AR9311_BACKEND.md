@@ -10,6 +10,7 @@ devices, so the backend is ioctl code and nothing is dlopen'd.
 
 ```
 NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / frame-shm
+ or SC231AI
           (MissingLynk media/artosyn drivers,                (mainline wave5 +
            one V4L2 capture node "ar-cvisp")                  MissingLynk patches)
 ```
@@ -37,10 +38,16 @@ NT99235 --CSI-2--> VIF --> ISP --> CVISP  ==dma-buf==>  wave5 H.265  --> RTP / f
   below) or an IDR period from `video0.gopSize` with VPS/SPS/PPS on every
   IDR. The camera
   buffer's capture timestamp travels through the encoder to the frame-shm
-  `pts`. `image.mirror` / `image.flip` are done here too (V4L2 HFLIP/VFLIP,
-  set at open): mirroring at the sensor would move the Bayer phase the ISP
-  is tuned for.
-- **Auto-exposure** (`src/ar9311_ae.c`): see below.
+  `pts`. `image.mirror` / `image.flip` turn the readout at the sensor when
+  its driver has an `orientation` parameter (the SC231AI: the Bayer phase
+  the ISP sees stays in all four orientations and the frame still arrives
+  top-down, so strips and sub-frame sync keep working).  Otherwise (the
+  NT99235, whose phase the ISP tuning depends on) the encoder turns the
+  picture (V4L2 HFLIP/VFLIP, set at open); an encoder flip reads the frame
+  bottom-up, so it turns sub-frame sync and with it strips off, with a
+  warning.
+- **Auto-exposure** (`src/ar9311_ae.c`) and **white balance**
+  (`src/ar9311_awb.c`): see below.
 - **Output** (`src/ar9311_runtime.c`): the shared HEVC RTP packetizer over
   `udp://` / `unix://`, or the `frame-shm://` whole-frame ring (the transport
   `ar8030-transport-tx` consumes on OpenIPC's AR8030 targets).
@@ -220,22 +227,32 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
 waybeam's own AE loop, written against the kernel interfaces of the
 MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
 
-- **Metering:** `/sys/kernel/debug/ar-isp/stats_raw`, the ISP's 36x16 zone
-  grid of per-channel 8-bit sums (linear, before gamma).  Zone luma is the
-  mean of the four channel means; the centre half of the frame counts
-  double.  A zone at a mean of 240 or more counts as clipped.
+- **Metering:** `/sys/kernel/debug/ar-isp/stats_raw`, the ISP's zone grid
+  of per-channel 8-bit sums (linear, before gamma and before the white
+  balance).  The grid is 36 blocks down the frame, each 16 zones across
+  (the driver header calls them columns and rows the other way round; the
+  SC231AI's test pattern, a horizontal ramp, shows it).  Zone luma is the
+  mean of the channels the bound sensor meters on: all four for the
+  NT99235, the two greens (channels 0 and 3) for the SC231AI, whose red and
+  blue sit well below green until the white balance lifts them.  The centre
+  half of the frame counts double.  A zone at a mean of 240 or more counts
+  as clipped.
 - **Control:** one decision per new statistics frame at `isp.aeFps` (default
   15 Hz, so the sensor's 1-2 frame latency always has passed).  Exposure is
   the product lines x gain; each decision corrects half the log error
   towards the target, holding inside a +-8 % deadband.  The target is a
-  metered luma of 56; when more than 4 % of zones clip it is lowered in
-  proportion (to at most half), so a bright sky does not wash out the rest.
-- **Actuation:** integration time first (up to one frame, 1123 lines at
-  1080p60), then analogue gain through the sensor's code formula
+  metered luma of 56 for the NT99235 and 28 for the SC231AI, whose tuning
+  gamma is a stop brighter (its test pattern: raw 14 % -> 148, 69 % -> 253,
+  mid-grey near raw 10 %); exposure compensation scales either.  When more
+  than 4 % of zones clip it is lowered in proportion (to at most half), so
+  a bright sky does not wash out the rest.
+- **Actuation:** integration time first (up to one frame: 1123 lines at
+  1080p60 for the NT99235, 1114 for the SC231AI), then analogue gain through the sensor's code formula
   (1x-64x, 1/16 steps per octave); lines absorb the code's rounding, and at
   the line limit the next code is taken only when the lower one falls more
-  than 2 % short.  Written to `/sys/module/nt99235/parameters/{exposure,
-  gain}`.  The ISP's gain-keyed denoise stages (`rnr/lnr/de3d/cfa/cnf_gain`)
+  than 2 % short.  Written to `/sys/module/<sensor>/parameters/{exposure,
+  gain}` of whichever sensor driver bound the camera (both use the same
+  gain code scale).  The ISP's gain-keyed denoise stages (`rnr/lnr/de3d/cfa/cnf_gain`)
   follow the applied gain and are re-armed through debugfs.
 - **Anti-flicker (live):** `isp.antiFlickerHz` `0` (off), `50` or `60`.
   Mains light ripples at twice its frequency, so with it on, an exposure of
@@ -255,8 +272,49 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
 
 Measured on a P1 indoors: a covered lens reaches 64x within about 1 s and
 recovers as fast when uncovered; a steady scene holds with no moves.  Not
-yet in this loop: tone-curve selection (the ISP stays on its default), AWB.  Without the statistics or sensor interfaces AE
+yet in this loop: tone-curve selection (the ISP stays on its default).  Without the statistics or sensor interfaces AE
 stays off and the camera keeps the sensor driver's fixed exposure.
+
+## White balance
+
+The ISP's zone statistics are taken before its white balance stage, and
+everything after that stage is colour-neutral (the SC231AI's test pattern,
+a ramp with all four Bayer channels equal, comes out grey at every level
+with unity gains).  So the gains that render a neutral surface grey are
+simply green/red and green/blue of that surface, and the AWB only has to
+find the neutral surfaces of a frame:
+
+- **Calibration:** per sensor, the raw colour of grey under a warm and a
+  daylight light, measured as the gains that rendered a grey surface grey:
+  SC231AI 310/962 under a lamp (taken as 2800 K), 461/743 on a D65 monitor
+  (6500 K), Q8.  The line through these two points in (ln R/G, ln B/G) is
+  the sensor's illuminant line.  The NT99235 has no calibration yet; for it
+  the AWB stays off and the gains stay as loaded.
+- **Estimate:** one per new statistics frame at `isp.awbFps` (default 15).
+  Zones with a channel at 235 or more (clipped) or green under 8 (noise)
+  are skipped.  A zone counts as neutral when its colour lies within 0.18
+  (ln units) of the illuminant line, between somewhat warmer than the warm
+  point and well past daylight; coloured objects sit off the line and do
+  not pull the balance.  The neutral zones, weighted by brightness, give a
+  position on the line, and that point's G/R and G/B are the gains.  Fewer
+  than 24 neutral zones: no estimate, the gains hold.
+- **Actuation:** each decision moves the red and blue gains 15 % of the
+  way (log domain), holding inside a 1 % deadband, so the balance settles
+  in about a second without visible steps.  Written to the ISP driver's
+  `/sys/kernel/debug/ar-isp/white_balance` (`"red green blue"`, Q8, green
+  stays 256).
+- **Modes (live):** `isp.awbMode` `auto`, or `ct_manual` to fix the balance
+  at `isp.awbCt` kelvin (the illuminant line, linear in mired between the
+  two calibration points; applies at once).  `isp.awbFps` `0` stops the
+  loop and leaves the gains where they are.
+- **Status:** `GET /api/v1/awb` (mode, gains, the estimate's neutral zones,
+  R/G, B/G and colour temperature, decision and move counters; `"mode":
+  "off"` when the loop is not running).
+
+Measured on a P1 (SC231AI): from the loader's daylight gains under a warm
+lamp the loop settles at 309/960 (2755 K) within about a second, where a
+white wall reads neutral; a hand in the frame does not move it; 6500 K
+manual gives 461/743 at once and auto returns.
 
 ## Picture controls (`/api/v1/iq`)
 
@@ -288,11 +346,14 @@ and the picture stays the tuned one.
 
 ## Runtime prerequisites
 
-The kernel modules `nt99235 ar-csi2 ar-vif ar-isp ar-cvisp wave5`, the
-Wave521C firmware (`/lib/firmware/cnm/wave521c_k3_codec_fw.bin`) and the ISP
-tuning (`/lib/firmware/artosyn/nt99235-tuning-preview-fpv.bin`).
-`init.d/load-ar9311-camera start` loads the modules;
-`init.d/S95waybeam.ar9311` runs it before starting the daemon.
+The kernel modules `nt99235` or `sc231ai`, `ar-csi2 ar-vif ar-isp ar-cvisp
+wave5`, the Wave521C firmware (`/lib/firmware/cnm/wave521c_k3_codec_fw.bin`)
+and the sensor's ISP tuning (`/lib/firmware/artosyn/nt99235-tuning-preview-fpv.bin`
+or `sc231ai-tuning-preview-fpv.bin`).  `init.d/load-ar9311-camera start`
+loads the sensor drivers in turn until one binds (one device-tree node names
+both; each driver reads the chip ID at probe), then the chain with the bound
+sensor's tuning file and, for the SC231AI, daylight white balance gains to
+start from; `init.d/S95waybeam.ar9311` runs it before starting the daemon.
 
 ## Configuration surface (first slice)
 
@@ -304,12 +365,13 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `video0.bitrate` | live (wave5 re-targets the rate controller) |
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
+| `isp.awbMode`, `isp.awbCt`, `isp.awbFps` (white balance) | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (encoder-side, both = 180 degrees), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (both = 180 degrees; at the SC231AI sensor, encoder-side for the NT99235), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.
-Everything else — ISP tuning, AWB, audio, recording, snapshot, ROI,
+Everything else — ISP tuning, audio, recording, snapshot, ROI,
 SVC-T resilience presets, slicing, debug OSD — is advertised unsupported and
 rejected: `ar9311_validate_config()` (`src/ar9311_validation.c`) and the
 field list in `src/venc_api.c` say exactly what runs.
