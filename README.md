@@ -1330,8 +1330,9 @@ same-host consumer (waybeam-link) can apply per-frame FEC at frame
 boundaries instead of re-fragmenting pre-built RTP packets. The ring is an
 8-slot SPSC region — 384 KB per slot on Star6E and Maruko, 512 KB on CV610;
 each slot carries an 8-byte `VencFrameMeta` header (`pts`, `codec`, `flags`
-— `flags` bit 0 marks an IDR, bit 3 is reserved for the receiver-set
-SALVAGED flag) followed by the raw frame. On a full ring (consumer stalled or gone)
+— `flags` bit 0 marks an IDR, bits 3 and 5 are reserved for the
+receiver-set SALVAGED and DISCONT flags; `codec` 0x02 marks RTP/Opus entries,
+which only a receiver's separate audio ring carries) followed by the raw frame. On a full ring (consumer stalled or gone)
 the encoder drops the frame and keeps running — it never blocks. Like
 `shm://` it is video-only (a nonzero `audioPort` uses a dedicated local
 UDP audio destination) and cannot be switched to/from live (restart
