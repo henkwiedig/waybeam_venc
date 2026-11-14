@@ -28,9 +28,11 @@
 
 /* Gain in Q10, 1024 = 1x: the scale of isp.gainMax/gainMin. */
 #define AR9311_AE_GAIN_ONE 1024u
-/* Sensor analogue gain code range (gain = 2^(code>>4) * (16 + (code&15)) / 16,
- * 1x at 0x00 to 64x at 0x60; nt99235 driver). */
-#define AR9311_AE_GAIN_CODE_MAX 0x60
+/* Sensor gain code range, the nt99235 driver's scale (gain = 2^(code>>4) *
+ * (16 + (code&15)) / 16, 1x at 0x00): up to 640x at 0x94, the SC231AI's top
+ * (analogue to 116.5x, digital above).  Each sensor has its own ceiling in
+ * ar9311_ae.c; the NT99235 stops at 64x (0x60). */
+#define AR9311_AE_GAIN_CODE_MAX 0x94
 /* 1080p60 frame: 1125 lines, integration up to 1123 (NT99235 driver clamp;
  * the SC231AI's is lower, see ar9311_ae.c). */
 #define AR9311_AE_LINES_MAX 1123u
@@ -104,6 +106,11 @@ typedef struct Ar9311Ae Ar9311Ae;
  *  the statistics or sensor interfaces are missing; the camera then simply
  *  keeps its fixed exposure. */
 Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz);
+
+/** Called with the new gain (Q10) each time the AE moves it, just before it
+ *  re-arms the ISP's gain ladders: a stage that follows the gain writes its
+ *  parameter here and rides on that re-arm.  NULL for none. */
+void ar9311_ae_set_gain_hook(void (*hook)(uint32_t gain_q10));
 
 /** Replace the limits (live config changes).  Takes effect next decision. */
 void ar9311_ae_set_limits(Ar9311Ae *ae, const Ar9311AeLimits *limits);

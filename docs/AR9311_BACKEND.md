@@ -248,13 +248,17 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
   than 4 % of zones clip it is lowered in proportion (to at most half), so
   a bright sky does not wash out the rest.
 - **Actuation:** integration time first (up to one frame: 1123 lines at
-  1080p60 for the NT99235, 1114 for the SC231AI), then analogue gain through the sensor's code formula
-  (1x-64x, 1/16 steps per octave); lines absorb the code's rounding, and at
+  1080p60 for the NT99235, 1114 for the SC231AI), then gain through the sensor's code formula
+  (1/16 steps per octave): 1x-64x on the NT99235, 1x-640x on the SC231AI,
+  whose driver (builder P1 kernel patch 0009) uses its analogue gain to
+  116.5x and the sensor's digital gain above, as the vendor's AE does in the
+  dark (measured on a stock P1: 116.5x x 5.5x at 1/60 s); lines absorb the code's rounding, and at
   the line limit the next code is taken only when the lower one falls more
   than 2 % short.  Written to `/sys/module/<sensor>/parameters/{exposure,
   gain}` of whichever sensor driver bound the camera (both use the same
   gain code scale).  The ISP's gain-keyed denoise stages (`rnr/lnr/de3d/cfa/cnf_gain`)
-  follow the applied gain and are re-armed through debugfs.
+  follow the applied gain and are re-armed through debugfs, and so does
+  saturation above 64x (see "Saturation" below).
 - **Anti-flicker (live):** `isp.antiFlickerHz` `0` (off), `50` or `60`.
   Mains light ripples at twice its frequency, so with it on, an exposure of
   at least one half period gets an integration time that is a whole number
@@ -267,12 +271,14 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
   11.5x, 60 Hz -> 1123 lines at 7x, luma held throughout.
 - **Limits (live):** `isp.shutterMaxUs` / `shutterMinUs` (converted to
   lines, 14.815 us each) and `isp.gainMax` / `gainMin` (1024 = 1x); 0 means
-  the sensor's own range.  `isp.aeFps` is read at start.
+  the sensor's own range, and either is capped at the sensor's ceiling.  `isp.aeFps` is read at start.
 - **Status:** `GET /api/v1/ae` (luma, target, clipped zones, lines,
   exposure in us, gain, decision and move counters, limits).
 
 Measured on a P1 indoors: a covered lens reaches 64x within about 1 s and
-recovers as fast when uncovered; a steady scene holds with no moves.  Not
+recovers as fast when uncovered; a steady scene holds with no moves.  An
+SC231AI in a dark room (lamp off, daylight behind blinds) settles near 544x
+on target, where the 64x ceiling left it 3.6 stops under (luma 2.3 of 28).  Not
 yet in this loop: tone-curve selection (the ISP stays on its default).  Without the statistics or sensor interfaces AE
 stays off and the camera keeps the sensor driver's fixed exposure.
 
@@ -329,6 +335,9 @@ The field table is in the contract ("AR9311 subset"); behind it:
   chroma coefficients of the ISP's colour-space matrix (bank 0x3c00), scaled.
   The vendor's matrix writer packs the Cb/Cr offsets (the 128 mid-point)
   into the same words; those stay, or a desaturated picture turns green.
+  Above 64x the AE scales it down with the gain, linearly in log2(gain) to
+  35 % at 640x: there an SC231AI's shadows came out purple (green clipped,
+  red and blue lifted) where the vendor's picture stays near grey.
 - **Contrast** (`csc.contr`, 50 = tuned): the gamma curve's output, scaled
   about mid-grey.
 - **Sharpness** (`sharpen.manual.*`, 2048 = tuned): lnr register 0x3d14, the

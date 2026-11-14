@@ -1,4 +1,5 @@
 #include "ar9311_ae.h"
+#include "ar9311_picture.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -79,8 +80,9 @@ static int test_gain_and_meter(void)
 	f += expect("gain code 0x10 is 2x", ar9311_ae_gain_q10(0x10) == 2048);
 	f += expect("gain code 0x18 is 3x", ar9311_ae_gain_q10(0x18) == 3072);
 	f += expect("gain code 0x60 is 64x", ar9311_ae_gain_q10(0x60) == 65536);
-	f += expect("gain code clamps above 0x60",
-		ar9311_ae_gain_q10(0x7f) == 65536);
+	f += expect("gain code 0x94 is 640x", ar9311_ae_gain_q10(0x94) == 655360);
+	f += expect("gain code clamps above 0x94",
+		ar9311_ae_gain_q10(0xff) == 655360);
 
 	make_grid(rro, 80, 0);
 	f += expect("meter flat grid",
@@ -290,10 +292,37 @@ static int test_ev(void)
 	return f;
 }
 
+/* Saturation by gain (ar9311_picture.h): whole to 64x, the floor at 640x. */
+static int test_saturation_by_gain(void)
+{
+	uint32_t prev = 100, s, g;
+	int f = 0, monotonic = 1;
+
+	f += expect("saturation whole at 1x",
+		ar9311_picture_saturation_at(100, 1024) == 100);
+	f += expect("saturation whole at 64x",
+		ar9311_picture_saturation_at(100, 64u * 1024u) == 100);
+	f += expect("saturation at its floor at 640x",
+		ar9311_picture_saturation_at(100, 640u * 1024u) == 35);
+	f += expect("saturation stays at the floor above 640x",
+		ar9311_picture_saturation_at(100, 1000u * 1024u) == 35);
+	f += expect("saturation scales the configured value",
+		ar9311_picture_saturation_at(150, 640u * 1024u) == 53 &&
+		ar9311_picture_saturation_at(0, 640u * 1024u) == 0);
+	for (g = 64u * 1024u; g <= 640u * 1024u; g += 4096u) {
+		s = ar9311_picture_saturation_at(100, g);
+		monotonic &= s <= prev;
+		prev = s;
+	}
+	f += expect("saturation falls monotonically from 64x to 640x",
+		monotonic);
+	return f;
+}
+
 int main(void)
 {
 	int failures = test_gain_and_meter() + test_split() + test_step() +
-		test_flicker() + test_ev();
+		test_flicker() + test_ev() + test_saturation_by_gain();
 
 	printf("ar9311 ae: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

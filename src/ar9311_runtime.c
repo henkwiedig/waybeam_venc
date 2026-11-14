@@ -403,7 +403,8 @@ static uint32_t ar9311_us_to_lines(uint32_t us, uint32_t fallback)
 }
 
 /* Config limits in the AE's units.  0 means "no limit": the sensor's own
- * range, 1 line to one frame period and 1x to 64x. */
+ * range, 1 line to one frame period and 1x to its gain ceiling (64x on the
+ * NT99235, 640x on the SC231AI; the AE caps it per sensor). */
 static void ar9311_ae_limits_from(const VencConfigIsp *isp, Ar9311AeLimits *lim)
 {
 	lim->lines_min = ar9311_us_to_lines(isp->shutter_min_us, 1);
@@ -1510,6 +1511,7 @@ static int ar9311_init(void *opaque)
 
 		/* Non-fatal: without AE the camera keeps its fixed exposure. */
 		ar9311_ae_limits_from(&ctx->config.isp, &lim);
+		ar9311_ae_set_gain_hook(ar9311_picture_set_gain);
 		ctx->ae = ar9311_ae_start(&lim, ctx->config.isp.ae_fps);
 	}
 	/* Non-fatal: without AWB the gains stay as the camera loader set them. */

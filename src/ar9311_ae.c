@@ -16,24 +16,34 @@
 /* The P1 is built with an NT99235 or an SC231AI camera.  Both drivers take
  * exposure (lines) and gain (the same code scale) as writable module
  * parameters; the AE drives whichever one bound the camera node, within
- * that driver's integration clamp and metering the channels that track
- * its brightness.
+ * that driver's integration clamp and gain ceiling, metering the channels
+ * that track its brightness.
+ *
+ * The SC231AI goes to 640x: in the dark the vendor's AE runs its analogue
+ * gain to 116.5x and adds the sensor's digital gain up to 5.5x (641x), at
+ * the same 1/60 s; stopping at the NT99235's 64x left a dark room 2.5-3.5
+ * stops under the target.
  *
  * The target scales with the sensor's tone curve: the SC231AI's tuning
  * gamma is bright (its test pattern measured raw 14 % -> 148, 69 % -> 253,
  * mid-grey near raw 10 %), so the same metered target as the NT99235
  * overexposed it by a stop and clipped highlights early.  Exposure
- * compensation stays relative: 0 EV is the sensor's own target. */
+ * compensation stays relative: 0 EV is the sensor's own target.  The
+ * vendor's AE exposes 0.3 EV more, but its tone curve compresses the
+ * highlights that pushes up and ours clips them, so ours stays here. */
 typedef struct {
 	const char *name;
 	uint32_t lines_max;
+	unsigned gain_code_max;
 	unsigned channels;      /* AR9311_AE_METER_* */
 	unsigned target_q8;     /* scale on the metered target, 256 = 1x */
 } AeSensor;
 
 static const AeSensor g_ae_sensors[] = {
-	{ "nt99235", AR9311_AE_LINES_MAX, AR9311_AE_METER_ALL, 256u },
-	{ "sc231ai", 1114u, AR9311_AE_METER_GREEN_03, 128u },   /* 1125 - 11 lines */
+	{ "nt99235", AR9311_AE_LINES_MAX, 0x60u, AR9311_AE_METER_ALL, 256u },
+	/* 1125 - 11 lines; 640x */
+	{ "sc231ai", 1114u, AR9311_AE_GAIN_CODE_MAX, AR9311_AE_METER_GREEN_03,
+		128u },
 };
 static const AeSensor *g_ae_sensor;
 static char g_ae_exposure_path[64];
@@ -41,12 +51,13 @@ static char g_ae_gain_path[64];
 #define AE_SENSOR_EXPOSURE g_ae_exposure_path
 #define AE_SENSOR_GAIN g_ae_gain_path
 
-/* The config's limits for the bound sensor: within its integration clamp,
- * so the AE never counts on lines the driver would cut, and with the target
- * scaled to its tone curve. */
+/* The config's limits for the bound sensor: within its integration clamp
+ * and gain ceiling, so the AE never counts on lines or gain the driver would
+ * cut, and with the target scaled to its tone curve. */
 static Ar9311AeLimits sensor_limits(const Ar9311AeLimits *limits)
 {
 	Ar9311AeLimits lim = *limits;
+	uint32_t gain_max;
 
 	if (!g_ae_sensor)
 		return lim;
@@ -54,6 +65,11 @@ static Ar9311AeLimits sensor_limits(const Ar9311AeLimits *limits)
 		lim.lines_max = g_ae_sensor->lines_max;
 	if (lim.lines_min > lim.lines_max)
 		lim.lines_min = lim.lines_max;
+	gain_max = ar9311_ae_gain_q10(g_ae_sensor->gain_code_max);
+	if (lim.gain_max_q10 > gain_max)
+		lim.gain_max_q10 = gain_max;
+	if (lim.gain_min_q10 > lim.gain_max_q10)
+		lim.gain_min_q10 = lim.gain_max_q10;
 	lim.target = (lim.target * g_ae_sensor->target_q8 + 128u) / 256u;
 	if (lim.target < 1)
 		lim.target = 1;
@@ -382,6 +398,13 @@ int ar9311_stats_read(uint8_t *buf, uint32_t *seq)
 	return 0;
 }
 
+static void (*g_ae_gain_hook)(uint32_t gain_q10);
+
+void ar9311_ae_set_gain_hook(void (*hook)(uint32_t gain_q10))
+{
+	g_ae_gain_hook = hook;
+}
+
 /* Sensor first, then the ISP ladders when the gain moved, re-armed so the
  * driver re-reads them. */
 static int apply_point(const Ar9311AePoint *pt, const Ar9311AePoint *prev)
@@ -400,6 +423,8 @@ static int apply_point(const Ar9311AePoint *pt, const Ar9311AePoint *prev)
 	for (i = 0; i < sizeof(g_ae_ladders) / sizeof(g_ae_ladders[0]); i++)
 		if (write_int(g_ae_ladders[i], q8) != 0)
 			return -1;
+	if (g_ae_gain_hook)
+		g_ae_gain_hook(ar9311_ae_gain_q10(pt->gain_code));
 	return write_int(AE_LADDER_ARM, 1);
 }
 
@@ -549,6 +574,8 @@ Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz)
 	ae->period_us = 1000000u / (rate_hz < 1 ? 1 : rate_hz > 30 ? 30 : rate_hz);
 	ae->point.lines = (uint32_t)lines;
 	ae->point.gain_code = (unsigned)code;
+	if (g_ae_gain_hook)
+		g_ae_gain_hook(ar9311_ae_gain_q10((unsigned)code));
 	ae->exposure = ar9311_ae_exposure_of(&ae->point);
 	if (pthread_create(&ae->thread, NULL, ae_thread, ae) != 0) {
 		pthread_mutex_destroy(&ae->lock);

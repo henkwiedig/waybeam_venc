@@ -1,5 +1,21 @@
 # History
 
+## [0.97.0] - 2026-11-14
+
+AR9311: **the SC231AI sees in the dark.**  No contract change.
+
+- The SC231AI's gain ceiling is 640x (was the NT99235's 64x).  A stock P1
+  in a dark room runs the same sensor at 1/60 s with 116.5x analogue gain
+  and the sensor's digital gain on top (364x there, 641x with the lens
+  covered); at 64x ours sat 3.6 stops under its target (luma 2.3 of 28)
+  and the picture was near black.  Needs the builder's P1 kernel patch
+  0009, which takes the gain code up to 0x94 (analogue to 116.5x, digital
+  above); the NT99235 stays at 64x.  `GET /api/v1/ae` reports the
+  sensor's ceiling in `limits.gainMax`; `isp.gainMax` above it is capped.
+- The ISP's gain-keyed denoise follows the real gain to 640x, and above
+  64x saturation falls with the gain to 35 % at 640x.  At 364x with 64x
+  denoise the picture was purple colour noise; with both, it is close to
+  the stock picture.
 ## [0.96.2] - 2026-11-11
 
 AR9311: **the sensor mode names the camera that is fitted.**  No contract
