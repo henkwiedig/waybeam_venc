@@ -1,5 +1,26 @@
 # History
 
+## [0.98.0] - 2026-11-15
+
+**A resilience preset the encoder can't run is refused, not saved.**
+`contract_version` moves to **0.41.0**.
+
+- On AR9311, `video0.resilience=fpv` (or `rally`, `range`, `ltr`) through
+  `/api/v1/set` answered 200 and was saved; the respawn then refused its own
+  config ("AR9311 supports video0.resilience off, rescue, ... (no SVC-T
+  presets)") on every start, and with waybeam down nothing could set it back
+  (a tester did it from PixelPilot's menu).  The SET check judged the staged
+  config, which still held the previous preset's intra-refresh / SVC-T fields
+  beside the new name.  It now judges the config as the next start loads it,
+  preset expanded: 409, nothing saved, the encoder keeps running.
+- `GET /api/v1/capabilities` lists the presets the backend runs in
+  `video0.resilience`'s `ui.options` (all ten on Star6E, Maruko and CV610),
+  from the same check; the dashboard and PixelPilot's menu offer only those.
+- AR9311 lists five: off, rescue, quality, racing, endurance.  With intra
+  refresh on, wave5 sends no periodic IDR, so the presets' GOP does nothing
+  there and sprint and patrol would run as racing and endurance.  They are
+  still accepted, so a config that names one still starts.
+
 ## [0.97.0] - 2026-11-14
 
 AR9311: **the SC231AI sees in the dark.**  No contract change.

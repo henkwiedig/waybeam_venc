@@ -2645,6 +2645,20 @@ static int test_capabilities_emits_ui(void)
 				end && c && c < end);
 		}
 	}
+	/* video0.resilience lists the presets the backend runs (all of them on
+	 * star6e, which has SVC-T), from the add_options callback. */
+	{
+		const char *p = strstr(response, "\"video0.resilience\"");
+		CHECK("cap has resilience", p != NULL);
+		if (p) {
+			const char *end = strchr(p, ']');
+			const char *o = strstr(p, "\"options\":[\"off\",\"rescue\"");
+			const char *f = strstr(p, "\"fpv\"");
+			CHECK("cap resilience options", end && o && o < end);
+			CHECK("cap resilience offers fpv on star6e",
+				end && f && f < end);
+		}
+	}
 	return failures;
 }
 

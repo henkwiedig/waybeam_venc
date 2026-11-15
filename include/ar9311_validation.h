@@ -15,6 +15,12 @@
  *  otherwise the reason it is not. */
 const char *ar9311_validate_config(const VencConfig *cfg);
 
+/** 1 for a video0.resilience preset worth offering here.  sprint and patrol
+ *  are racing and endurance with another GOP, and with intra refresh on
+ *  wave5 sends no periodic IDR, so here they are the same streams: still
+ *  accepted (a saved one must start), not offered. */
+int ar9311_resilience_offered(const char *name);
+
 /** 1 for a field the backend reads only at start (a set needs a restart),
  *  0 for a field it applies live. */
 int ar9311_field_is_restart_only(const char *field_key);

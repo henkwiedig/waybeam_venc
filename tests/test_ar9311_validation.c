@@ -99,6 +99,33 @@ static int test_validation(void)
 	(void)venc_config_apply_resilience_preset("range", &cfg.video0);
 	failures += expect_config("ar9311_reject_svc_preset", &cfg, 0);
 
+	/* What /api/v1/capabilities offers for video0.resilience on AR9311:
+	 * the presets that pass once expanded, less the ones that run as
+	 * another preset here. */
+	{
+		char got[160] = "";
+		const char *name;
+
+		for (size_t i = 0;
+		     (name = venc_config_resilience_preset_name(i)); i++) {
+			valid_config(&cfg);
+			(void)venc_config_apply_resilience_preset(name,
+				&cfg.video0);
+			if (ar9311_validate_config(&cfg) ||
+			    !ar9311_resilience_offered(name))
+				continue;
+			strncat(got, " ", sizeof(got) - strlen(got) - 1);
+			strncat(got, name, sizeof(got) - strlen(got) - 1);
+		}
+		failures += expect("ar9311_resilience_presets",
+			strcmp(got, " off rescue quality racing endurance") == 0,
+			got);
+	}
+	/* sprint and patrol stay accepted: a saved one must still start. */
+	valid_config(&cfg);
+	(void)venc_config_apply_resilience_preset("patrol", &cfg.video0);
+	failures += expect_config("ar9311_accept_unlisted_patrol", &cfg, 1);
+
 	valid_config(&cfg);
 	cfg.video0.strips = 4;
 	failures += expect_config("ar9311_accept_4_strips", &cfg, 1);

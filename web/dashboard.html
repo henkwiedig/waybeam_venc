@@ -1854,6 +1854,13 @@ async function init(){
 
       }
 
+      // A static row's choices come from the backend when it lists them
+      // (video0.resilience: AR9311 has no rally/range/fpv).
+      for(const k of Object.keys(ENUMS)){
+        const o = capabilities[k]?.ui?.options;
+        if(o && o.length) ENUMS[k] = o;
+      }
+
     }
 
     if(verR.ok){

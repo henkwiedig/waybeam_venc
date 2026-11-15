@@ -70,6 +70,11 @@ static const char *validate_output(const VencConfig *cfg)
 	return NULL;
 }
 
+int ar9311_resilience_offered(const char *name)
+{
+	return strcmp(name, "sprint") != 0 && strcmp(name, "patrol") != 0;
+}
+
 const char *ar9311_validate_config(const VencConfig *cfg)
 {
 	const char *err;

@@ -494,6 +494,10 @@ int venc_config_save(const char *path, const VencConfig *cfg);
  * not recognised (caller should warn / fall back to "off"). */
 int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v);
 
+/* The named resilience presets in table order, NULL past the last one.  The
+ * parameterised "ltr" / "ltr:<N>" forms are not in the table. */
+const char *venc_config_resilience_preset_name(size_t index);
+
 /* Expand a framing preset name ("off" | "low"|"medium"|"high" stab presets |
  * "zoom-1.25x"|"zoom-1.50x"|"zoom-1.75x"|"zoom-2x" zoom presets) into the
  * derived stab_crop_pct + stab_recenter_speed and/or zoom_pct fields of `v`

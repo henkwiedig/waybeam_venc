@@ -429,67 +429,75 @@ static int parse_resolution(const char *str, uint32_t *w, uint32_t *h)
  * Named presets set intra_refresh_*, ref_*, AND gop_size, so picking a
  * preset fully determines all recovery / GOP behaviour.  Only `off`
  * leaves gop_size untouched — that mode is the escape hatch where the
- * user's `gopSize` field drives.
+ * user's `gopSize` field drives. */
+struct resilience_preset {
+	const char *name;
+	const char *intra;
+	uint8_t ref_base;
+	uint8_t ref_enhance;
+	double gop_sec;           /* 0 = preserve caller's gop_size */
+};
+
+/* Resilience preset table.
  *
- * Returns 0 on success ("off" or recognised preset), or -1 if `name`
+ * Stripe-only recovery (no IDR needed) requires the effective
+ * wavefront to fit inside the GOP.  Effective wavefront is
+ *   nominal_wavefront × (ref_enhance + 1)
+ * because the TRAIL_N rewrite drops `ref_enhance` of every
+ * `(ref_enhance + 1)` frames from the decoder's reference list.
+ *
+ * OSD-safe column: presets with `ref_enhance > 0` (SVC-T) leave
+ * persistent chroma artefacts in static high-contrast overlays
+ * (OSD text).  Confirmed by bench testing: even `rally` (1:1
+ * SVC-T) shows green smear over the OSD area that won't clear
+ * via stripes — only via IDR.  Root cause: chroma stays in
+ * skip mode for static-content MBs, and intra-refresh stripes
+ * landing in TRAIL_N frames don't propagate the chroma fix
+ * into the DPB.  SDK exposes no force-intra-MB knob to fix it
+ * (ROI is delta-QP only, doesn't override skip-mode for
+ * zero-residual blocks).  See README.md for full discussion.
+ *
+ *   preset      nominal   enh  GOP    eff.wave  OSD-safe?
+ *   ─────────────────────────────────────────────────────
+ *   off         off       0    user   -         yes (no refresh)
+ *   rescue      off       0    0.25s  -         yes (IDR-spam, lowest latency)
+ *   quality     off       0    4.0s   -         yes (IDR-based)
+ *   sprint      150ms     0    0.5s   150ms     yes (intra+short GOP)
+ *   racing      150ms     0    2.0s   150ms     yes
+ *   endurance   500ms     0    2.0s   500ms     yes
+ *   patrol      500ms     0    4.0s   500ms     yes
+ *   rally       150ms     1    2.0s   300ms     no  (light refPred)
+ *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
+ *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
+ *
+ * The "ltr" family is handled below the table, not in it: its
+ * enhance ratio is derived from the GOP (which the user owns) and
+ * so cannot be a static column.  See the block above the loop.
+ */
+static const struct resilience_preset g_resilience_presets[] = {
+	{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
+	{ "rescue",     "off",      0, 0, 0.25 },  /* IDR-spam, ~35% bitrate to IDRs */
+	{ "quality",    "off",      0, 0, 4.0 },
+	{ "sprint",     "fast",     0, 0, 0.5 },   /* intra-refresh + aggressive IDR */
+	{ "racing",     "fast",     0, 0, 2.0 },
+	{ "endurance",  "balanced", 0, 0, 2.0 },
+	{ "patrol",     "balanced", 0, 0, 4.0 },
+	{ "rally",      "fast",     1, 1, 2.0 },
+	{ "range",      "balanced", 1, 4, 2.0 },
+	{ "fpv",        "robust",   1, 4, 2.0 },
+};
+
+const char *venc_config_resilience_preset_name(size_t index)
+{
+	if (index >= sizeof(g_resilience_presets) / sizeof(g_resilience_presets[0]))
+		return NULL;
+	return g_resilience_presets[index].name;
+}
+
+/* Returns 0 on success ("off" or recognised preset), or -1 if `name`
  * is unrecognised (caller should warn and fall back to "off"). */
 int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 {
-	struct preset {
-		const char *name;
-		const char *intra;
-		uint8_t ref_base;
-		uint8_t ref_enhance;
-		double gop_sec;           /* 0 = preserve caller's gop_size */
-	};
-	/* Resilience preset table.
-	 *
-	 * Stripe-only recovery (no IDR needed) requires the effective
-	 * wavefront to fit inside the GOP.  Effective wavefront is
-	 *   nominal_wavefront × (ref_enhance + 1)
-	 * because the TRAIL_N rewrite drops `ref_enhance` of every
-	 * `(ref_enhance + 1)` frames from the decoder's reference list.
-	 *
-	 * OSD-safe column: presets with `ref_enhance > 0` (SVC-T) leave
-	 * persistent chroma artefacts in static high-contrast overlays
-	 * (OSD text).  Confirmed by bench testing: even `rally` (1:1
-	 * SVC-T) shows green smear over the OSD area that won't clear
-	 * via stripes — only via IDR.  Root cause: chroma stays in
-	 * skip mode for static-content MBs, and intra-refresh stripes
-	 * landing in TRAIL_N frames don't propagate the chroma fix
-	 * into the DPB.  SDK exposes no force-intra-MB knob to fix it
-	 * (ROI is delta-QP only, doesn't override skip-mode for
-	 * zero-residual blocks).  See README.md for full discussion.
-	 *
-	 *   preset      nominal   enh  GOP    eff.wave  OSD-safe?
-	 *   ─────────────────────────────────────────────────────
-	 *   off         off       0    user   -         yes (no refresh)
-	 *   rescue      off       0    0.25s  -         yes (IDR-spam, lowest latency)
-	 *   quality     off       0    4.0s   -         yes (IDR-based)
-	 *   sprint      150ms     0    0.5s   150ms     yes (intra+short GOP)
-	 *   racing      150ms     0    2.0s   150ms     yes
-	 *   endurance   500ms     0    2.0s   500ms     yes
-	 *   patrol      500ms     0    4.0s   500ms     yes
-	 *   rally       150ms     1    2.0s   300ms     no  (light refPred)
-	 *   range       500ms     4    2.0s   2500ms    no  (heavy refPred)
-	 *   fpv        1000ms     4    2.0s   5000ms    no  (heaviest refPred)
-	 *
-	 * The "ltr" family is handled below the table, not in it: its
-	 * enhance ratio is derived from the GOP (which the user owns) and
-	 * so cannot be a static column.  See the block above the loop.
-	 */
-	static const struct preset table[] = {
-		{ "off",        "off",      0, 0, 0.0 },   /* gopSize honoured */
-		{ "rescue",     "off",      0, 0, 0.25 },  /* IDR-spam, ~35% bitrate to IDRs */
-		{ "quality",    "off",      0, 0, 4.0 },
-		{ "sprint",     "fast",     0, 0, 0.5 },   /* intra-refresh + aggressive IDR */
-		{ "racing",     "fast",     0, 0, 2.0 },
-		{ "endurance",  "balanced", 0, 0, 2.0 },
-		{ "patrol",     "balanced", 0, 0, 4.0 },
-		{ "rally",      "fast",     1, 1, 2.0 },
-		{ "range",      "balanced", 1, 4, 2.0 },
-		{ "fpv",        "robust",   1, 4, 2.0 },
-	};
 
 	const char *want = (!name || !*name) ? "off" : name;
 
@@ -538,18 +546,20 @@ int venc_config_apply_resilience_preset(const char *name, VencConfigVideo *v)
 		return 0;
 	}
 
-	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); ++i) {
-		if (strcmp(want, table[i].name) != 0)
+	for (size_t i = 0; venc_config_resilience_preset_name(i); ++i) {
+		const struct resilience_preset *p = &g_resilience_presets[i];
+
+		if (strcmp(want, p->name) != 0)
 			continue;
 		safe_strcpy(v->intra_refresh_mode,
-			sizeof(v->intra_refresh_mode), table[i].intra);
+			sizeof(v->intra_refresh_mode), p->intra);
 		v->intra_refresh_lines = 0;
 		v->intra_refresh_qp = 0;
-		v->ref_base = table[i].ref_base;
-		v->ref_enhance = table[i].ref_enhance;
+		v->ref_base = p->ref_base;
+		v->ref_enhance = p->ref_enhance;
 		v->ref_pred = true;
-		if (table[i].gop_sec > 0.0)
-			v->gop_size = table[i].gop_sec;
+		if (p->gop_sec > 0.0)
+			v->gop_size = p->gop_sec;
 		return 0;
 	}
 	return -1;

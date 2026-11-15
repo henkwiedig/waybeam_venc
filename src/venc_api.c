@@ -383,6 +383,8 @@ typedef struct {
 	double min, max, step;      /* "number" range (0/0/0 = unset) */
 	const char *const *options; /* NULL-terminated list for "select", else NULL */
 	const char *tooltip;
+	/* "select" options that depend on the backend, in place of `options`. */
+	void (*add_options)(cJSON *arr);
 } FieldUi;
 
 typedef struct {
@@ -404,6 +406,17 @@ typedef struct {
 	{ #section "." #member, ft, m, \
 	  offsetof(VencConfig, section.member), \
 	  sizeof(((VencConfig*)0)->section.member), (uiptr) }
+
+static void add_resilience_options(cJSON *arr);
+/* Under the static Video row on the dashboard; clients take the list. */
+static const FieldUi ui_resilience = {
+	"Video", "Resilience", "select", 0, 0, 0, NULL,
+	"Error-resilience preset (intra refresh, SVC-T, GOP).  Lists the "
+	"presets this backend runs.  AR9311 has no SVC-T (no rally, range, "
+	"fpv) and no periodic IDR under intra refresh, so sprint and patrol "
+	"would run as racing and endurance.  Restart-only.",
+	add_resilience_options
+};
 
 /* UI descriptors for the Stabilization section.  These carry data-driven UI
  * metadata so the dashboard renders the whole group from /api/v1/capabilities
@@ -717,7 +730,7 @@ static const FieldDesc g_fields[] = {
 	FIELD_UI(video0, sub_frame_sync, FT_BOOL, MUT_RESTART, &ui_sub_frame_sync),
 	FIELD_UI(video0, strips,       FT_UINT,   MUT_RESTART, &ui_strips),
 	FIELD_UI(video0, strip_overlap, FT_UINT,  MUT_RESTART, &ui_strip_overlap),
-	FIELD(video0, resilience,           FT_STRING, MUT_RESTART),
+	FIELD_UI(video0, resilience,        FT_STRING, MUT_RESTART, &ui_resilience),
 	FIELD_UI(video0, intra_refresh_qp, FT_UINT8, MUT_RESTART, &ui_intra_refresh_qp),
 	/* zoom_x/y stay live for smooth panning via MI_VPE_SetPortCrop; the zoom
 	 * magnitude is part of the framing preset (derived zoom_pct), not a
@@ -1781,6 +1794,44 @@ static const char *validate_backend_config(const char *backend_name,
 	return NULL;
 }
 
+/* The backend's verdict on `cfg` as the next start loads it.  The loader
+ * expands video0.resilience into the intra-refresh / SVC-T fields; a staged
+ * cfg still carries the previous preset's expansion beside a new name, and
+ * AR9311 rejects by those fields.  Judged as staged, video0.resilience=fpv
+ * passed on AR9311, was saved, and the respawn refused its own config. */
+static const char *validate_backend_as_loaded(const VencConfig *cfg)
+{
+	VencConfig probe = *cfg;
+
+	(void)venc_config_apply_resilience_preset(probe.video0.resilience,
+		&probe.video0);
+	return validate_backend_config(g_backend, &probe);
+}
+
+/* video0.resilience options: the named presets this backend runs, judged as
+ * SET judges them, so a client that offers only these can't be refused.
+ * AR9311 also leaves out the ones that run as another preset there. */
+static void add_resilience_options(cJSON *arr)
+{
+	VencConfig cfg;
+	const char *name;
+
+	pthread_mutex_lock(&g_cfg_mutex);
+	cfg = *g_cfg;
+	pthread_mutex_unlock(&g_cfg_mutex);
+	for (size_t i = 0; (name = venc_config_resilience_preset_name(i)); i++) {
+		snprintf(cfg.video0.resilience, sizeof(cfg.video0.resilience),
+			"%s", name);
+		if (validate_backend_as_loaded(&cfg))
+			continue;
+#if HAVE_BACKEND_AR9311
+		if (!ar9311_resilience_offered(name))
+			continue;
+#endif
+		cJSON_AddItemToArray(arr, cJSON_CreateString(name));
+	}
+}
+
 /* ── Query string helpers ────────────────────────────────────────────── */
 
 static int hex_nibble(unsigned char c)
@@ -2753,7 +2804,7 @@ static int stage_params_into_cfg(VencConfig *cfg, const SetQueryParam *params,
 	}
 
 	{
-		const char *err = validate_backend_config(g_backend, cfg);
+		const char *err = validate_backend_as_loaded(cfg);
 		if (err) {
 			*status_code = 409;
 			return make_error_json("validation_failed", err,
@@ -3489,6 +3540,8 @@ static int handle_capabilities(int fd, const HttpRequest *req, void *ctx)
 				cJSON *arr = cJSON_AddArrayToObject(ui, "options");
 				for (const char *const *o = u->options; *o; o++)
 					cJSON_AddItemToArray(arr, cJSON_CreateString(*o));
+			} else if (u->add_options) {
+				u->add_options(cJSON_AddArrayToObject(ui, "options"));
 			}
 		}
 	}
