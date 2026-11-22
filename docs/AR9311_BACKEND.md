@@ -242,9 +242,15 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
   15 Hz, so the sensor's 1-2 frame latency always has passed).  Exposure is
   the product lines x gain; each decision corrects half the log error
   towards the target, holding inside a +-8 % deadband.  The target is a
-  metered luma of 56 for the NT99235 and 28 for the SC231AI, whose tuning
-  gamma is a stop brighter (its test pattern: raw 14 % -> 148, 69 % -> 253,
-  mid-grey near raw 10 %); exposure compensation scales either.  When more
+  metered luma of 79 for the NT99235 and 40 for the SC231AI.  The
+  NT99235's is 56 + 0.5 EV: side by side with a stock P1 in sunshine, stock
+  took 86 lines where 56 took 61 (+0.5 EV).  The SC231AI's tuning
+  gamma is brighter (its test pattern: raw 14 % -> 148, 69 % -> 253,
+  mid-grey near raw 10 %): half the target with the brightest curve pinned,
+  +0.5 EV on that since the tone pages follow the exposure, measured
+  against a stock P1 at the same light (sunshine: stock 39 lines where a
+  target of 28 took 27, +0.53 EV; dusk +0.35 EV; at 40 the two were within
+  0.1 EV).  Exposure compensation scales either.  When more
   than 4 % of zones clip it is lowered in proportion (to at most half), so
   a bright sky does not wash out the rest.
 - **Actuation:** integration time first (up to one frame: 1123 lines at
@@ -272,14 +278,34 @@ MissingLynk drivers (it shares no code with MissingLynk's GPL `ml-aed`):
 - **Limits (live):** `isp.shutterMaxUs` / `shutterMinUs` (converted to
   lines, 14.815 us each) and `isp.gainMax` / `gainMin` (1024 = 1x); 0 means
   the sensor's own range, and either is capped at the sensor's ceiling.  `isp.aeFps` is read at start.
+- **Tone pages:** the ISP's gamma curve and DRC profile follow the
+  exposure, as on stock.  The sensor's tuning file carries the vendor AE's
+  exposure table (rising {gain Q8, lines} entries, ~3 % apart, from
+  0x0b6524, count at 0x0b6508: 478 for the SC231AI, 366 for the NT99235); the position of the decided exposure on it,
+  Q8, goes to the ISP driver's `tone_scalar` parameter and a write of `1` to
+  debugfs `tone` rebuilds both pages from the tuning file's band tables
+  whenever it has moved by a whole entry.  A stock P1 at dusk (1114 lines x
+  31x) sat at ~341, between DRC profiles 3 and 4, where stock's page was; in
+  sunshine the position drops below 110 (DRC profile 0, the strongest shadow
+  lift), at night it climbs towards profile 5 (shadows held against noise).
+  At the same light as a stock P1 (sunshine, same exposure) both pages
+  came out within a few counts of stock's, for either camera.  The
+  NT99235's file leaves DRC profiles 4 and 5 empty (its dark end); there
+  the driver turns DRC off, as a stock P1 with that camera does at night
+  (kernel patch 0012; at 1123 lines x 64x both then sit within a code or
+  two of each other).  The ISP's cm and cm2 stages (exposure-keyed
+  saturation) read the same scalar: the AE writes it to `cm_trigger` and
+  `cm2_trigger` too and re-latches them through debugfs `colour` (builder
+  P1 kernel patches 0010/0012; without that node they stay at their loaded
+  rows).  cm2 runs on the NT99235 and is gated off on the SC231AI.
 - **Status:** `GET /api/v1/ae` (luma, target, clipped zones, lines,
-  exposure in us, gain, decision and move counters, limits).
+  exposure in us, gain, decision and move counters, the tone scalar as
+  `toneScalar` (-1 while pinned), limits).
 
 Measured on a P1 indoors: a covered lens reaches 64x within about 1 s and
 recovers as fast when uncovered; a steady scene holds with no moves.  An
 SC231AI in a dark room (lamp off, daylight behind blinds) settles near 544x
-on target, where the 64x ceiling left it 3.6 stops under (luma 2.3 of 28).  Not
-yet in this loop: tone-curve selection (the ISP stays on its default).  Without the statistics or sensor interfaces AE
+on target, where the 64x ceiling left it 3.6 stops under (luma 2.3 of 28).  Without the statistics or sensor interfaces AE
 stays off and the camera keeps the sensor driver's fixed exposure.
 
 ## White balance
@@ -291,37 +317,73 @@ with unity gains).  So the gains that render a neutral surface grey are
 simply green/red and green/blue of that surface, and the AWB only has to
 find the neutral surfaces of a frame:
 
-- **Calibration:** per sensor, the raw colour of grey under a warm and a
-  daylight light, measured as the gains that rendered a grey surface grey:
-  SC231AI 310/962 under a lamp (taken as 2800 K), 461/743 on a D65 monitor
-  (6500 K), Q8.  The line through these two points in (ln R/G, ln B/G) is
-  the sensor's illuminant line.  The NT99235 has no calibration yet; for it
-  the AWB stays off and the gains stay as loaded.
+- **Calibration:** per sensor, the raw colour of grey at three points of
+  its illuminant locus, as gains (Q8): SC231AI warm 269/834 (2800 K), mid
+  400/644 (4000 K) and daylight 537/474 (6500 K), joined by straight lines
+  in (ln R/G, ln B/G).  A position t on the locus runs 0 (warm), 1 (mid),
+  2 (daylight), on past either end along the end segment.  The mid and
+  daylight points are a stock P1's own balance on the same unit: 399/646 at
+  dusk, where its colour matrix was tuning bank 1 (3700-4300 K), and 537/474
+  in sunshine, bank 3 (6200-6700 K); the sunlit white walls of that scene
+  measured 504-552/465-495 in our statistics.  A straight line through warm
+  and mid reached daylight's red gain with 10 % too much blue: the locus
+  bends.  The warm point is a lamp (310/962 as first measured, scaled by the
+  0.867 a monitor-and-lamp calibration had left grey short of green).  The
+  NT99235 has no calibration yet; for it the AWB stays off and the gains
+  stay as loaded.
 - **Estimate:** one per new statistics frame at `isp.awbFps` (default 15).
   Zones with a channel at 235 or more (clipped) or green under 8 (noise)
   are skipped.  A zone counts as neutral when its colour lies within 0.18
-  (ln units) of the illuminant line, between somewhat warmer than the warm
-  point and well past daylight; coloured objects sit off the line and do
-  not pull the balance.  The neutral zones, weighted by brightness, give a
-  position on the line, and that point's G/R and G/B are the gains.  Fewer
-  than 24 neutral zones: no estimate, the gains hold.
+  (ln units) of the locus, between t -0.5 (~2400 K) and 2.4 (~8700 K,
+  shade); coloured objects sit off the locus and do not pull the balance.
+  The neutral zones, each counted once (weighted by brightness, a lit lamp
+  shade outvoted the grey the light fell on), give a position on the locus,
+  and that point's G/R and G/B are the gains.  Fewer than 24 neutral zones:
+  no estimate, the gains hold.
+- **Daylight:** orange, brown and yellow surfaces lie along the warm end of
+  the locus and pass for greys under a warm light.  On a sunny autumn
+  garden 35 of 45 "neutral" zones were such objects (tree, hedge, brick)
+  and pulled the balance to 458/591 where stock and the white walls said
+  537/474.  At an exposure only daylight gives, neutral zones therefore
+  start at t 1.2 (~4300 K): up to a tone scalar of 180 (272 lines at 1x;
+  the sun sits at 70-115), relaxing linearly to the whole locus at 260
+  (1114 lines at 2.8x; a lamp-lit room is near 390).  When that window
+  holds fewer than 24 zones (a sunset) the whole locus counts.  Same garden:
+  527/483, stock 537/474.
 - **Actuation:** each decision moves the red and blue gains 15 % of the
   way (log domain), holding inside a 1 % deadband, so the balance settles
   in about a second without visible steps.  Written to the ISP driver's
   `/sys/kernel/debug/ar-isp/white_balance` (`"red green blue"`, Q8, green
   stays 256).
+- **Colour stages:** the colour temperature of the applied gains (their
+  position on the locus, linear in mired between the points) goes to the
+  ISP driver's `colour_temp` parameter, re-latched by a write to debugfs
+  `colour`, whenever it has moved by 2 mired (builder P1 kernel patch 0010).
+  The driver picks ccm1's matrix from the tuning file's four banks by their
+  kelvin bands, blending in the gaps, and cm's CT column the same way, as
+  stock's AWB does: in sunshine bank 3 and cm 1.0, word for word stock's
+  registers, where the pinned bank 0 and column 0 (0.9) left foliage and
+  sky 12 % less saturated.  Without the parameter the colour stages stay
+  as loaded.
 - **Modes (live):** `isp.awbMode` `auto`, or `ct_manual` to fix the balance
-  at `isp.awbCt` kelvin (the illuminant line, linear in mired between the
-  two calibration points; applies at once).  `isp.awbFps` `0` stops the
+  at `isp.awbCt` kelvin (on the locus, linear in mired between the
+  calibration points; applies at once).  `isp.awbFps` `0` stops the
   loop and leaves the gains where they are.
 - **Status:** `GET /api/v1/awb` (mode, gains, the estimate's neutral zones,
-  R/G, B/G and colour temperature, decision and move counters; `"mode":
-  "off"` when the loop is not running).
+  R/G, B/G and colour temperature, the colour temperature last given to the
+  ISP's colour stages as `ccmCt` (0 none), decision and move counters;
+  `"mode": "off"` when the loop is not running).
 
-Measured on a P1 (SC231AI): from the loader's daylight gains under a warm
-lamp the loop settles at 309/960 (2755 K) within about a second, where a
-white wall reads neutral; a hand in the frame does not move it; 6500 K
-manual gives 461/743 at once and auto returns.
+Measured on a P1 (SC231AI), with the first calibration: from the loader's
+daylight gains under a warm lamp the loop settled at 309/960 (2755 K) within
+about a second; a hand in the frame does not move it.  With the current one
+(2026-11-21, dusk with a street lamp, the scene stock had balanced at
+399/646): 351/700 (4437 K), frame mean U/V -0.1/-0.5, where the first
+calibration gave 330/922 (3119 K) and a blue picture.  With the
+three-point locus (2026-11-22, sunny garden, stock captured 72 s apart):
+528/481 (6255 K; stock 546/466), ccm1 bank 3 and cm 32 as stock's, frame
+mean U/V +1.6/-4.0 against stock's +0.3/-3.9, gamma and DRC pages within a
+few counts.  6500 K manual gives 537/474, 4000 K 400/644.
 
 ## Picture controls (`/api/v1/iq`)
 
@@ -337,14 +399,29 @@ The field table is in the contract ("AR9311 subset"); behind it:
   into the same words; those stay, or a desaturated picture turns green.
   Above 64x the AE scales it down with the gain, linearly in log2(gain) to
   35 % at 640x: there an SC231AI's shadows came out purple (green clipped,
-  red and blue lifted) where the vendor's picture stays near grey.
+  red and blue lifted) where the vendor's picture stays near grey.  That
+  ramp stands in for the ISP's cm stage, which the vendor lowers with the
+  exposure; when the AE drives cm itself (tone pages following the
+  exposure, kernel patch 0010) the ramp is off, as stock's colour-space
+  matrix stays unscaled at night: both together left the picture grey
+  (chroma 2.5 against stock's 8.0 at 640x; without the ramp 9.4).
 - **Contrast** (`csc.contr`, 50 = tuned): the gamma curve's output, scaled
   about mid-grey.
 - **Sharpness** (`sharpen.manual.*`, 2048 = tuned): lnr register 0x3d14, the
   two fields the vendor's acutance control drives, scaled the vendor's way
-  (to zero below 100 %, towards the field maximum above) from the value the
-  driver replays. The vendor's own setting sits low, so most of the visible
-  range is above 100 % (edge energy 2.9 / 3.3 / 6.9 at 0 / 100 / 200 %).
+  (to zero below 100 %, towards the field maximum above).  100 % is, for
+  the NT99235, the value the driver replays (the vendor's own setting sits
+  low, so most of the visible range is above 100 %: edge energy 2.9 / 3.3 /
+  6.9 at 0 / 100 / 200 %); for the SC231AI, the tuning file's own
+  sharpening ladder at the current gain, as on a stock P1 (60 at 1x easing
+  to 18 at 640x, five times the replayed NT99235 value at 1x; kernel patch
+  0011, `sharpness_tuned=1` from the loader).  With it, its defect-pixel
+  thresholds (the tuning file's gain ladder, `dpc_tuned=1`), raw noise
+  reduction sub-stage bits (`rnr_mode=0x0c`, bit 4 by the ladder) and line length
+  (`line_length=2240`) are stock's too: on a sunny garden, stock captured
+  3 minutes apart, edge energy 18.4 against stock's 18.8 where it was 8.7,
+  mid-tone texture 30.3 against 30.2, leaf highlights without the white
+  sparkle the replayed defect thresholds let through.
 - **Exposure compensation** (`exposure.auto.compensation`): the AE target,
   56 x 2^ev for +-2 EV.
 
@@ -362,8 +439,19 @@ and the sensor's ISP tuning (`/lib/firmware/artosyn/nt99235-tuning-preview-fpv.b
 or `sc231ai-tuning-preview-fpv.bin`).  `init.d/load-ar9311-camera start`
 loads the sensor drivers in turn until one binds (one device-tree node names
 both; each driver reads the chip ID at probe), then the chain with the bound
-sensor's tuning file and, for the SC231AI, daylight white balance gains to
-start from; `init.d/S95waybeam.ar9311` runs it before starting the daemon.
+sensor's tuning file (named explicitly for the NT99235 too, so the AE can
+read its exposure table), for the NT99235 `drc_on=1 sharpness_tuned=1`
+(DRC on by its own gate and both table lengths, kernel patch 0012; never
+`gates=1` on this camera: its file's other gates start statistics engines
+the driver gives no buffer, which hung a P1), and for the SC231AI daylight
+white balance gains to start from and `gates=1` (the ISP takes the tuning
+file's stage gates: the
+replayed NT99235 trace had cm2 on and DRC plus three lens-shading enables
+off, where this sensor's tuning and a stock P1 have them the other way), plus
+`sharpness_tuned=1 dpc_tuned=1 rnr_mode=0x0c line_length=2240` (sharpening,
+defect-pixel thresholds, raw noise reduction and line length as a stock
+SC231AI P1 runs them, see "Sharpness"; drivers without kernel patch 0011
+ignore them); `init.d/S95waybeam.ar9311` runs it before starting the daemon.
 
 ## Configuration surface (first slice)
 

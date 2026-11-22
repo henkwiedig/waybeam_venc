@@ -1513,6 +1513,9 @@ static int ar9311_init(void *opaque)
 		ar9311_ae_limits_from(&ctx->config.isp, &lim);
 		ar9311_ae_set_gain_hook(ar9311_picture_set_gain);
 		ctx->ae = ar9311_ae_start(&lim, ctx->config.isp.ae_fps);
+		/* The cm stage lowers colour with the exposure itself; the
+		 * picture's own gain ramp would take it twice. */
+		ar9311_picture_set_gain_ramp(!ar9311_ae_drives_cm(ctx->ae));
 	}
 	/* Non-fatal: without AWB the gains stay as the camera loader set them. */
 	ar9311_awb_begin(ctx);

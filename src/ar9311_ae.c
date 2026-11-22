@@ -13,6 +13,19 @@
 
 #define AE_STATS_PATH "/sys/kernel/debug/ar-isp/stats_raw"
 #define AE_LADDER_ARM "/sys/kernel/debug/ar-isp/ladders"
+#define AE_TUNING_PARAM "/sys/module/ar_isp/parameters/tuning"
+#define AE_TONE_SCALAR "/sys/module/ar_isp/parameters/tone_scalar"
+#define AE_TONE_REBUILD "/sys/kernel/debug/ar-isp/tone"
+/* cm and cm2, the ISP's exposure-keyed saturation stages, read the same
+ * scalar; their re-latch is the colour node, absent from drivers without
+ * it.  cm2 runs on the NT99235 and is gated off on the SC231AI. */
+#define AE_CM_TRIGGER "/sys/module/ar_isp/parameters/cm_trigger"
+#define AE_CM2_TRIGGER "/sys/module/ar_isp/parameters/cm2_trigger"
+#define AE_COLOUR_RELATCH "/sys/kernel/debug/ar-isp/colour"
+/* The vendor AE's exposure table in a tuning file (ar9311_ae.h): entry
+ * count, then {gain Q8, lines} records. */
+#define AE_TONE_COUNT_OFF 0x0b6508u
+#define AE_TONE_TABLE_OFF 0x0b6524u
 /* The P1 is built with an NT99235 or an SC231AI camera.  Both drivers take
  * exposure (lines) and gain (the same code scale) as writable module
  * parameters; the AE drives whichever one bound the camera node, within
@@ -27,23 +40,29 @@
  * The target scales with the sensor's tone curve: the SC231AI's tuning
  * gamma is bright (its test pattern measured raw 14 % -> 148, 69 % -> 253,
  * mid-grey near raw 10 %), so the same metered target as the NT99235
- * overexposed it by a stop and clipped highlights early.  Exposure
- * compensation stays relative: 0 EV is the sensor's own target.  The
- * vendor's AE exposes 0.3 EV more, but its tone curve compresses the
- * highlights that pushes up and ours clips them, so ours stays here. */
+ * overexposed it by a stop with the brightest curve pinned.  With the tone
+ * pages following the exposure as stock's do, its gamma and DRC pages
+ * matched stock's at the same light, and stock exposed 0.53 EV more than a
+ * half target in sunshine (39 against 27 lines), 0.35 EV more at dusk: the
+ * SC231AI's 0 EV is +0.5 EV on the half.  The NT99235, side by side with
+ * a stock P1 in the same sunshine, came out the same: stock 86 lines where
+ * our target of 56 took 61, its tone pages likewise following the exposure
+ * (its gamma page matched stock's at the exposure's table position).  Its
+ * 0 EV is +0.5 EV on 56.  Exposure compensation stays relative to either. */
 typedef struct {
 	const char *name;
 	uint32_t lines_max;
 	unsigned gain_code_max;
 	unsigned channels;      /* AR9311_AE_METER_* */
 	unsigned target_q8;     /* scale on the metered target, 256 = 1x */
+	int tone;               /* drive the ISP's tone pages (ar9311_ae.h) */
 } AeSensor;
 
 static const AeSensor g_ae_sensors[] = {
-	{ "nt99235", AR9311_AE_LINES_MAX, 0x60u, AR9311_AE_METER_ALL, 256u },
+	{ "nt99235", AR9311_AE_LINES_MAX, 0x60u, AR9311_AE_METER_ALL, 362u, 1 },
 	/* 1125 - 11 lines; 640x */
 	{ "sc231ai", 1114u, AR9311_AE_GAIN_CODE_MAX, AR9311_AE_METER_GREEN_03,
-		128u },
+		181u, 1 },
 };
 static const AeSensor *g_ae_sensor;
 static char g_ae_exposure_path[64];
@@ -163,6 +182,43 @@ int ar9311_ae_meter(const uint8_t *rro, unsigned channels, Ar9311AeMeter *out)
 	}
 	out->luma = (float)(sum / weights);
 	return 0;
+}
+
+unsigned ar9311_ae_tone_table(const uint8_t *blob, size_t len, uint64_t *ev)
+{
+	uint32_t count, i;
+
+	if (len < AE_TONE_TABLE_OFF)
+		return 0;
+	count = get_le32(blob + AE_TONE_COUNT_OFF);
+	if (count < 2 || count > AR9311_AE_TONE_TABLE_MAX ||
+	    AE_TONE_TABLE_OFF + (size_t)count * 8u > len)
+		return 0;
+	for (i = 0; i < count; i++) {
+		const uint8_t *rec = blob + AE_TONE_TABLE_OFF + i * 8u;
+
+		ev[i] = (uint64_t)get_le32(rec) * get_le32(rec + 4);
+		if (ev[i] == 0 || (i > 0 && ev[i] < ev[i - 1]))
+			return 0;   /* not an exposure table */
+	}
+	return count;
+}
+
+uint32_t ar9311_ae_tone_scalar(const uint64_t *ev, unsigned n, double exposure)
+{
+	double e = exposure * 256.0;   /* the table's gain is Q8 */
+	unsigned i;
+
+	if (n < 2 || !(e > (double)ev[0]))
+		return 0;
+	for (i = 1; i < n; i++)
+		if ((double)ev[i] >= e) {
+			double span = (double)(ev[i] - ev[i - 1]);
+			double frac = span > 0.0 ? (e - (double)ev[i - 1]) / span : 0.0;
+
+			return (uint32_t)(((double)(i - 1) + frac) * 256.0 + 0.5);
+		}
+	return (n - 1) * 256u;
 }
 
 double ar9311_ae_exposure_of(const Ar9311AePoint *pt)
@@ -333,7 +389,21 @@ struct Ar9311Ae {
 	double exposure;
 	unsigned long decisions, moves;
 	int have_stats;
+	/* The tone pages (ar9311_ae.h): the tuning file's exposure table, and
+	 * the scalar last given to the ISP (-1 = none yet). */
+	uint64_t *tone_ev;
+	unsigned tone_n;
+	long tone_scalar;
+	int colour;   /* the driver re-latches cm on the scalar (colour node) */
 };
+
+/* The scalar for the AWB's daylight test (ar9311_ae_tone_now). */
+static long g_ae_tone_now = -1;
+
+long ar9311_ae_tone_now(void)
+{
+	return __atomic_load_n(&g_ae_tone_now, __ATOMIC_RELAXED);
+}
 
 uint32_t ar9311_ae_target_for_ev(double ev)
 {
@@ -435,6 +505,72 @@ static void sleep_us(uint32_t us)
 	nanosleep(&ts, NULL);
 }
 
+/* The tone pages follow the exposure the scene needs, rebuilt when it has
+ * moved by a whole table entry (~3 %). */
+static void apply_tone(Ar9311Ae *ae, double exposure)
+{
+	long scalar = (long)ar9311_ae_tone_scalar(ae->tone_ev, ae->tone_n,
+		exposure);
+
+	if (ae->tone_scalar >= 0 && labs(scalar - ae->tone_scalar) < 256)
+		return;
+	if (write_int(AE_TONE_SCALAR, scalar) != 0 ||
+	    write_int(AE_TONE_REBUILD, 1) != 0) {
+		fprintf(stderr, "WARN: [ar9311] AE: tone pages not updated: %s\n",
+			strerror(errno));
+		return;
+	}
+	if (ae->colour && (write_int(AE_CM_TRIGGER, scalar) != 0 ||
+	    write_int(AE_CM2_TRIGGER, scalar) != 0 ||
+	    write_int(AE_COLOUR_RELATCH, 1) != 0))
+		fprintf(stderr, "WARN: [ar9311] AE: cm not updated: %s\n",
+			strerror(errno));
+	pthread_mutex_lock(&ae->lock);
+	ae->tone_scalar = scalar;
+	pthread_mutex_unlock(&ae->lock);
+	__atomic_store_n(&g_ae_tone_now, scalar, __ATOMIC_RELAXED);
+}
+
+/* The exposure table of the tuning file the ISP runs (ar_isp's tuning
+ * parameter, a firmware path), or none. */
+static void load_tone(Ar9311Ae *ae)
+{
+	char name[128], path[192];
+	uint8_t *blob = NULL;
+	long len;
+	FILE *f;
+
+	f = fopen(AE_TUNING_PARAM, "r");
+	if (!f)
+		return;
+	if (!fgets(name, sizeof(name), f))
+		name[0] = '\0';
+	fclose(f);
+	name[strcspn(name, "\n")] = '\0';
+	if (!name[0] || access(AE_TONE_SCALAR, W_OK) != 0)
+		return;
+	snprintf(path, sizeof(path), "/lib/firmware/%s", name);
+	f = fopen(path, "rb");
+	if (!f)
+		return;
+	if (fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 &&
+	    fseek(f, 0, SEEK_SET) == 0 && (blob = malloc((size_t)len)) &&
+	    fread(blob, 1, (size_t)len, f) == (size_t)len &&
+	    (ae->tone_ev = malloc(AR9311_AE_TONE_TABLE_MAX * sizeof(uint64_t))))
+		ae->tone_n = ar9311_ae_tone_table(blob, (size_t)len, ae->tone_ev);
+	fclose(f);
+	free(blob);
+	ae->colour = ae->tone_n && access(AE_CM_TRIGGER, W_OK) == 0 &&
+		access(AE_CM2_TRIGGER, W_OK) == 0 &&
+		access(AE_COLOUR_RELATCH, W_OK) == 0;
+	if (ae->tone_n)
+		printf("> [ar9311] AE drives the tone pages%s (%s, %u exposures)\n",
+			ae->colour ? " and cm" : "", name, ae->tone_n);
+	else
+		fprintf(stderr, "WARN: [ar9311] AE: no exposure table in %s, "
+			"tone pages stay pinned\n", path);
+}
+
 static void decide(Ar9311Ae *ae, const uint8_t *stats)
 {
 	Ar9311AeMeter meter;
@@ -459,6 +595,8 @@ static void decide(Ar9311Ae *ae, const uint8_t *stats)
 	    apply_point(&next, &prev) != 0)
 		fprintf(stderr, "WARN: [ar9311] AE: writing the operating point "
 			"failed: %s\n", strerror(errno));
+	if (ae->tone_n)
+		apply_tone(ae, exposure);
 
 	pthread_mutex_lock(&ae->lock);
 	ae->meter = meter;
@@ -577,8 +715,12 @@ Ar9311Ae *ar9311_ae_start(const Ar9311AeLimits *limits, uint32_t rate_hz)
 	if (g_ae_gain_hook)
 		g_ae_gain_hook(ar9311_ae_gain_q10((unsigned)code));
 	ae->exposure = ar9311_ae_exposure_of(&ae->point);
+	ae->tone_scalar = -1;
+	if (g_ae_sensor->tone)
+		load_tone(ae);
 	if (pthread_create(&ae->thread, NULL, ae_thread, ae) != 0) {
 		pthread_mutex_destroy(&ae->lock);
+		free(ae->tone_ev);
 		free(ae);
 		return NULL;
 	}
@@ -619,18 +761,24 @@ char *ar9311_ae_status_json(Ar9311Ae *ae)
 		"\"target\":%u,\"saturatedZones\":%u,\"lines\":%u,"
 		"\"exposureUs\":%u,\"gainCode\":%u,\"gain\":%u,"
 		"\"decisions\":%lu,\"moves\":%lu,\"antiFlickerHz\":%u,"
-		"\"limits\":{\"linesMin\":%u,\"linesMax\":%u,"
+		"\"toneScalar\":%.1f,\"limits\":{\"linesMin\":%u,\"linesMax\":%u,"
 		"\"gainMin\":%u,\"gainMax\":%u}}}",
 		ae->have_stats ? "true" : "false", (double)ae->meter.luma,
 		lim.target, ae->meter.saturated, ae->point.lines,
 		(unsigned)((uint64_t)ae->point.lines * AR9311_AE_LINE_NS / 1000u),
 		ae->point.gain_code, ar9311_ae_gain_q10(ae->point.gain_code),
-		ae->decisions, ae->moves, lim.flicker_hz, lim.lines_min,
+		ae->decisions, ae->moves, lim.flicker_hz,
+		ae->tone_scalar < 0 ? -1.0 : ae->tone_scalar / 256.0, lim.lines_min,
 		lim.lines_max, lim.gain_min_q10, lim.gain_max_q10);
 	pthread_mutex_unlock(&ae->lock);
 	if (pos < 0 || pos >= (int)sizeof(buf))
 		return NULL;
 	return strdup(buf);
+}
+
+int ar9311_ae_drives_cm(const Ar9311Ae *ae)
+{
+	return ae && ae->colour;
 }
 
 void ar9311_ae_stop(Ar9311Ae *ae)
@@ -639,6 +787,8 @@ void ar9311_ae_stop(Ar9311Ae *ae)
 		return;
 	__atomic_store_n(&ae->stop, 1, __ATOMIC_RELEASE);
 	pthread_join(ae->thread, NULL);
+	__atomic_store_n(&g_ae_tone_now, -1, __ATOMIC_RELAXED);
 	pthread_mutex_destroy(&ae->lock);
+	free(ae->tone_ev);
 	free(ae);
 }

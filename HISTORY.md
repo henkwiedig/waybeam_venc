@@ -1,5 +1,109 @@
 # History
 
+## [0.99.0] - 2026-11-22
+
+AR9311 (SC231AI and NT99235): **the picture like stock.**
+`contract_version` moves to **0.42.0** (additive).  The SC231AI against a
+stock P1 on the same scene in sunshine (stock captured 72 s apart): gamma
+and DRC pages within a few counts, colour matrix and cm saturation word
+for word, exposure within 0.1 EV, white balance 528/481 against stock's
+546/466, and as sharp (edge energy 18.4 against 18.8, where it was 8.7).
+The NT99235 likewise, see below.
+
+- **White balance re-anchored on stock.**  A tester's P1 showed sunny
+  scenes black in the shadows and blue-purple in colour.  Side by side with
+  stock (same P1, same scene, registers read off the running stock ISP),
+  stock's AWB wrote 399/646 at dusk: our daylight point's B/R exactly, at
+  0.867 of both gains.  The calibration taken on a monitor and a lamp had
+  left grey 13 % short of green, so greys under skylight fell outside the
+  neutral band and only lamp-lit zones were left to balance on (3119 K at
+  dusk, a blue picture; magenta shadows and a purple hedge by day).  Both
+  calibration points carry the factor now (daylight 400/644, warm 269/834),
+  and every neutral zone counts once: weighted by brightness, a lit lamp
+  shade outvoted the grey the light fell on.  Same dusk scene: 351/700
+  (4437 K), frame mean U/V -0.1/-0.5, where it was 330/922 and +23/-20.
+- **The ISP's tone pages follow the exposure.**  The gamma curve and DRC
+  profile were pinned at an NT99235 trace's indoor point (DRC profile 4:
+  no shadow lift).  Stock selects them by the exposure's position on the
+  tuning file's exposure table; the AE now computes that position (Q8) and
+  hands it to the driver's `tone_scalar` whenever it moves by a whole
+  entry.  In sunshine that is DRC profile 0, which doubled the shadows of
+  a backlit scene without moving the sky.  `GET /api/v1/ae` reports it as
+  `toneScalar`.  NT99235: pinned as before.
+- **The SC231AI's ISP takes its tuning file's stage gates**
+  (`load-ar9311-camera`: `gates=1`): cm2 off, DRC on and three
+  lens-shading enables on, as the tuning file and a stock P1 have them;
+  the replayed NT99235 trace had them the other way.  The loader's starting
+  white balance moves to the new daylight point.
+- **The white balance's locus bends, and daylight ignores orange.**  In
+  sunshine stock balanced at 537/474, the sunlit white walls of the scene
+  measured 504-552/465-495, and ours wrote 458/591, a cyan picture.  The
+  straight line through the warm and dusk points reached that red gain
+  with 10 % too much blue, and 35 of the 45 zones taken for grey were
+  orange, brown and yellow surfaces (an autumn tree, a hedge, brick), which
+  lie on the warm end of the line.  The locus now has three points, warm
+  269/834 (2800 K), stock's dusk 400/644 (4000 K) and stock's daylight
+  537/474 (6500 K), reaching on to ~8700 K for shade; and at an exposure
+  only daylight gives (tone scalar up to 180, relaxing to 260) zones warmer
+  than ~4300 K do not count, unless too few others are left (a sunset).
+  Same garden: 527/483.  `isp.awbCt` 6500 K now gives 537/474.
+- **Colour matrix and saturation follow the light.**  The colour
+  temperature of the applied gains goes to the ISP driver (`colour_temp`,
+  re-latched through debugfs `colour`; builder P1 kernel patch 0010), which
+  blends the tuning file's four colour matrices by their kelvin bands and
+  picks cm's CT column the same way; the AE also hands cm its exposure row
+  (`cm_trigger`, the tone scalar).  Stock in sunshine held matrix bank 3
+  and cm 1.0; ours had the pinned bank 0 and the warm column's 0.9, foliage
+  and sky 12 % less saturated.  `GET /api/v1/awb` reports the colour
+  temperature given as `ccmCt`.  Without the driver change the colour
+  stages stay as loaded.
+- **SC231AI sharpness like stock.**  Fine detail (leaves, brick, roof
+  tiles) came out soft: half stock's edge energy.  The ISP replays an
+  NT99235 trace, and from it kept that camera's sharpening (0x000c000a,
+  below even its own tuning) where a stock SC231AI P1 runs its tuning
+  file's sharpening ladder (0x003c003c at 1x, easing with gain).  The same
+  trace carried one gain band of the defect-pixel thresholds (stock at 1x
+  runs the lower ones of its file's 1x band; the old ones, sharpened, left
+  white sparkle on sunlit leaves), the NT99235's raw noise reduction
+  sub-stage bits (stock's bit 4 keeps the texture of grass and foliage) and
+  its 2200-pixel line.  `load-ar9311-camera` passes the SC231AI's
+  (`sharpness_tuned=1 dpc_tuned=1 rnr_mode=0x0c line_length=2240`,
+  builder P1 kernel patch 0011); the four registers now read as stock's.
+  The `sharpen` control's 100 % is that tuned value.
+- **NT99235 like stock too.**  Side by side with a stock P1 carrying the
+  NT99235 in sunshine (the same tuning file, byte for byte), ours ran the
+  indoor point of the replayed trace: tone pages pinned, DRC off, 0.5 EV
+  under, the trace's sharpening and saturation rows; median Y 81 against
+  stock's 121, edge energy 6.5 against 16.0.  Its tone pages now follow
+  the exposure (its gamma page matched stock's within a few counts), its
+  target is 79 (+0.5 EV), the AE drives cm and cm2, and the loader names
+  its tuning file and passes `drc_on=1 sharpness_tuned=1` (builder P1
+  kernel patch 0012: DRC on by its own gate with both table lengths, and
+  off on the file's two empty DRC profiles, the dark end, as stock's is
+  at night).  Same light, minutes apart: median 114 against stock's 129,
+  edge energy 10.0 against 13.4 (stock's rest is sensor grain and its
+  per-frame local tone map).  At night (1123 lines x 64x) its levels sit
+  within a code or two of stock's.  `gates=1` stays
+  SC231AI-only: on the NT99235 its file's other gates start statistics
+  engines the driver gives no buffer, and a P1 loaded that way hung.
+- **Night like stock (SC231AI).**  In the dark (1114 lines x 640x, stock
+  at the same exposure) ours came out nearly grey and twice as noisy:
+  chroma 2.5 against stock's 8.0, noise 7.7 against 3.3.  Grey because the
+  picture's high-gain saturation ramp (to 35 % at 640x) now stacked on the
+  cm stage, which follows the exposure: the ramp is off when the AE drives
+  cm, and the colour-space matrix holds stock's own words.  Noise partly
+  because the raw noise reduction's bit 4, which brings out foliage
+  texture in sunshine, stayed on: it now follows the rnr ladder's per-band
+  flag in the tuning file (set to 8x and at 32x, clear at 16x and from
+  64x), as stock's 0xfc by day and 0xec at night; the loader passes
+  `rnr_mode=0x0c` (kernel patch 0011).  Now chroma 9.4, noise 4.3; the
+  rest is the gain ladders' position at night and stock's AE aiming
+  darker in the dark (open).
+- **SC231AI exposure +0.5 EV.**  The half target suited the brightest
+  gamma curve pinned; with the pages following the exposure, stock exposed
+  0.53 EV more in sunshine (0.35 EV at dusk).  Target luma 40 where it
+  was 28; the two now land within 0.1 EV.
+
 ## [0.98.0] - 2026-11-15
 
 **A resilience preset the encoder can't run is refused, not saved.**

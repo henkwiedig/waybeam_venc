@@ -25,6 +25,7 @@ static uint32_t g_sharpness = PICTURE_UNKNOWN;
  * thread and the API both land here. */
 static uint32_t g_saturation_set = AR9311_PICTURE_NEUTRAL;
 static uint32_t g_gain_q10 = 1024u;
+static int g_gain_ramp = 1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int write_uint(const char *path, uint32_t value)
@@ -61,6 +62,14 @@ static int apply_one(const char *name, const char *param, const char *relatch,
 	return -1;
 }
 
+/* Saturation as it applies now: on the ramp, or as set. */
+static uint32_t saturation_now(void)
+{
+	return g_gain_ramp ?
+		ar9311_picture_saturation_at(g_saturation_set, g_gain_q10) :
+		g_saturation_set;
+}
+
 int ar9311_picture_apply(uint32_t saturation, uint32_t contrast,
 	uint32_t sharpness)
 {
@@ -75,8 +84,7 @@ int ar9311_picture_apply(uint32_t saturation, uint32_t contrast,
 	pthread_mutex_lock(&g_lock);
 	g_saturation_set = saturation;
 	rc |= apply_one("saturation", PICTURE_SATURATION, PICTURE_LADDERS, 1,
-		ar9311_picture_saturation_at(saturation, g_gain_q10),
-		&g_saturation);
+		saturation_now(), &g_saturation);
 	rc |= apply_one("contrast", PICTURE_CONTRAST, PICTURE_TONE, 2,
 		contrast, &g_contrast);
 	rc |= apply_one("sharpness", PICTURE_SHARPNESS, PICTURE_LADDERS, 1,
@@ -91,8 +99,15 @@ void ar9311_picture_set_gain(uint32_t gain_q10)
 
 	pthread_mutex_lock(&g_lock);
 	g_gain_q10 = gain_q10;
-	value = ar9311_picture_saturation_at(g_saturation_set, gain_q10);
+	value = saturation_now();
 	if (value != g_saturation && write_uint(PICTURE_SATURATION, value) == 0)
 		g_saturation = value;
+	pthread_mutex_unlock(&g_lock);
+}
+
+void ar9311_picture_set_gain_ramp(int on)
+{
+	pthread_mutex_lock(&g_lock);
+	g_gain_ramp = on;
 	pthread_mutex_unlock(&g_lock);
 }

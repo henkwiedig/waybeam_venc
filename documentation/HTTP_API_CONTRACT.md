@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.41.0`
+- `contract_version`: `0.42.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -115,8 +115,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.98.0",
-    "contract_version": "0.41.0",
+    "app_version": "0.99.0",
+    "contract_version": "0.42.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -2070,6 +2070,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.42.0` (additive — tone pages follow the exposure on AR9311): `GET /api/v1/ae` on AR9311 adds `toneScalar`, the position of the AE's exposure on the sensor tuning file's exposure table that the ISP's gamma curve and DRC profile are selected and blended on (the vendor's AEC trigger scalar; `-1` while the pages are pinned, e.g. with no exposure table in the sensor's tuning file).  `GET /api/v1/awb` on AR9311 adds `ccmCt`, the colour temperature (kelvin) the AWB last gave the ISP driver's colour stages (colour matrix bank blend and cm saturation column; `0` when none was given, e.g. a driver without `colour_temp`).  The SC231AI's white balance is re-anchored on stock: a three-point illuminant locus (warm 269/834 at 2800 K, mid 400/644 at 4000 K, daylight 537/474 at 6500 K), which moves what `isp.awbMode=ct_manual` gives for an `isp.awbCt` (6500 K is now 537/474, 4000 K 400/644); no other field changes.
 - `0.41.0` (additive — resilience presets per backend): `video0.resilience` in `GET /api/v1/capabilities` carries a `ui` block (`group` "Video", `control` "select") whose `options` are the named presets this backend runs, in table order: all ten on Star6E, Maruko and CV610; `off`, `rescue`, `quality`, `racing`, `endurance` on AR9311, which has no SVC-T and, with intra refresh on, no periodic IDR, so `sprint` and `patrol` would run as `racing` and `endurance` (both stay accepted, so a saved one still starts, but are not listed).  The `ltr` / `ltr:<N>` forms stay accepted where the backend has SVC-T but are not listed.  `GET /api/v1/set` now judges a change against the backend as the next start loads it (preset expanded), so on AR9311 `video0.resilience=rally|range|fpv|ltr…` is refused with `409 validation_failed` and nothing is saved.  Before, the check saw the previous preset's expansion beside the new name, answered `200`, saved the preset, and the respawn refused its own `/etc/waybeam.json` on every start.
 - `0.40.0` (additive — white balance on AR9311): `isp.awbMode` (`auto` / `ct_manual`), `isp.awbCt` (kelvin) and `isp.awbFps` (`0` stops the loop) become supported and live on AR9311, driving waybeam's own AWB for the SC231AI camera (raw zone statistics, neutral zones on the sensor's illuminant line).  `GET /api/v1/awb` on AR9311 returns `{"engine":"ar9311","sensor","mode","gains":{"red","green","blue"},"estimate":{"live","zones","rg","bg","ct"},"decisions","moves"}`, or `{"engine":"ar9311","mode":"off"}` when the loop is not running (`isp.awbFps` 0, or a sensor without a colour calibration such as the NT99235).  See the AR9311 backend notes (`docs/AR9311_BACKEND.md`, "White balance").
 - `0.39.0` (additive — strip overlap on AR9311): adds `video0.stripOverlap` (`video0.strip_overlap`), uint `0`..`2`, default `1`, restart-required, persisted. Each strip encodes that many 64-line rows past each seam and the join drops them; with it the loop filter runs across slice edges. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".

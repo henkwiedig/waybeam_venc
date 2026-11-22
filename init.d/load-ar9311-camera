@@ -21,10 +21,11 @@
 SENSORS="nt99235 sc231ai"
 MODULES="ar-csi2 ar-vif ar-isp ar-cvisp wave5"
 
-# SC231AI white balance, Q8: neutral grey on a D65 monitor, measured on a
-# P1 (the ISP leaves 1.0, which turns this sensor green).
-SC231AI_WB_RED=461
-SC231AI_WB_BLUE=743
+# SC231AI white balance, Q8: daylight neutral, what the AWB starts from
+# (the ISP leaves 1.0, which turns this sensor green).  Matches the AWB's
+# daylight point (src/ar9311_awb.c), re-anchored on stock's gains.
+SC231AI_WB_RED=400
+SC231AI_WB_BLUE=644
 
 loaded()
 {
@@ -49,14 +50,34 @@ sensor_args()
 }
 
 # ar-isp and ar-cvisp take the bound sensor's tuning file; the NT99235's
-# is the device tree's default.
+# is the device tree's default.  The SC231AI's ISP also takes the tuning
+# file's stage gates (gates=1): the configure path replays an NT99235
+# trace, which left cm2 on, DRC and three lens-shading enables off where
+# this sensor's tuning, and a stock P1 running it, have them the other way.
+# From that trace it also kept the NT99235's edge sharpening, defect-pixel
+# thresholds (one gain band of them), raw noise reduction sub-stages and
+# line length.  A stock SC231AI P1 runs its tuning file's sharpening and
+# defect-pixel gain ladders (at 1x: 5x the trace's sharpening, lower
+# defect thresholds), rnr bits 2-3 set and bit 4 by its ladder (set in
+# sunshine, clear at night), and a 2240-pixel line (builder P1
+# kernel patch 0011; older drivers ignore the parameters).
+# The NT99235 names its tuning file too (the device tree's default, but the
+# AE reads its exposure table through ar_isp's tuning parameter) and takes
+# its file's sharpening ladder and DRC: on alone (drc_on=1, patch 0012),
+# never by gates=1, whose other NT99235 gates start statistics engines this
+# driver gives no buffer and hung a P1.
 isp_args()
 {
 	case "$1" in
 	sc231ai)
 		printf ' tuning=artosyn/sc231ai-tuning-preview-fpv.bin'
 		[ "$2" = ar-isp ] &&
-			printf ' wb_red=%s wb_blue=%s' "$SC231AI_WB_RED" "$SC231AI_WB_BLUE"
+			printf ' wb_red=%s wb_blue=%s gates=1 sharpness_tuned=1 dpc_tuned=1 rnr_mode=0x0c line_length=2240' \
+				"$SC231AI_WB_RED" "$SC231AI_WB_BLUE"
+		;;
+	nt99235)
+		printf ' tuning=artosyn/nt99235-tuning-preview-fpv.bin'
+		[ "$2" = ar-isp ] && printf ' drc_on=1 sharpness_tuned=1'
 		;;
 	esac
 }

@@ -1,6 +1,7 @@
 #ifndef AR9311_AE_H
 #define AR9311_AE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Auto-exposure for the AR9311 camera (NT99235 or SC231AI + Artosyn ISP on
@@ -77,6 +78,30 @@ uint32_t ar9311_ae_gain_q10(unsigned code);
 #define AR9311_AE_METER_ALL 0xfu
 #define AR9311_AE_METER_GREEN_03 0x9u
 
+/* The ISP's tone pages (gamma curve, DRC profile) follow the exposure as the
+ * vendor's do: the tuning file carries the vendor AE's exposure table,
+ * {gain Q8, lines} rising in ~3 % steps, and the position of the current
+ * exposure on it is the scalar the ISP's tone selector takes (ar_isp
+ * tone_scalar, Q8), each page's band table in the tuning file picking or
+ * blending its entries.  Measured on a stock P1 at dusk: 1114 lines x 31x
+ * sits at entry ~341, between DRC profiles 3 and 4, where stock's page was;
+ * in sunshine the position drops below 110 (DRC profile 0, the strongest
+ * shadow lift), in the dark it climbs towards profile 5 (shadows held down
+ * against noise).  The NT99235's file carries its own table (366 entries);
+ * a stock P1 with that camera in sunshine sat at 86 lines x 1x, position
+ * ~143, and its gamma page matched ours built there. */
+#define AR9311_AE_TONE_TABLE_MAX 1024u
+
+/** The exposure table of tuning file @p blob (@p len bytes) as exposures
+ *  (gain Q8 x lines) into @p ev (AR9311_AE_TONE_TABLE_MAX entries).  The
+ *  entry count, or 0 when the file holds no usable table. */
+unsigned ar9311_ae_tone_table(const uint8_t *blob, size_t len, uint64_t *ev);
+
+/** Position of @p exposure (line-gain units) on table @p ev of @p n
+ *  entries, Q8: interpolated between entries, clamped to the ends. */
+uint32_t ar9311_ae_tone_scalar(const uint64_t *ev, unsigned n,
+	double exposure);
+
 /** Meter one RRO grid (the stats snapshot without its leading sequence
  *  word) over @p channels (AR9311_AE_METER_*; 0 means all four).  Returns
  *  0, or -1 for a grid with no pixel counts. */
@@ -121,6 +146,11 @@ void ar9311_ae_get_limits(Ar9311Ae *ae, Ar9311AeLimits *limits);
 /** Status as a malloc'd JSON API reply, or NULL. */
 char *ar9311_ae_status_json(Ar9311Ae *ae);
 
+/** 1 when @p ae hands the ISP's cm/cm2 stages their exposure row (the
+ *  driver has the colour node and the sensor's tone pages follow the
+ *  exposure), else 0.  NULL is 0. */
+int ar9311_ae_drives_cm(const Ar9311Ae *ae);
+
 /** Stop and join the thread, free @p ae.  NULL is fine. */
 void ar9311_ae_stop(Ar9311Ae *ae);
 
@@ -134,5 +164,10 @@ int ar9311_stats_read(uint8_t *buf, uint32_t *seq);
 /** Name of the camera sensor driver that bound the camera ("nt99235",
  *  "sc231ai"), or NULL. */
 const char *ar9311_sensor_name(void);
+
+/** The tone scalar (Q8) the running AE last gave the ISP: where the
+ *  exposure sits between sunshine and the dark.  -1 when no AE drives the
+ *  tone pages. */
+long ar9311_ae_tone_now(void);
 
 #endif /* AR9311_AE_H */

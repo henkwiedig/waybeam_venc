@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int expect(const char *name, int ok)
@@ -319,10 +320,46 @@ static int test_saturation_by_gain(void)
 	return f;
 }
 
+/* The tone scalar: the exposure's position on the tuning file's table. */
+static int test_tone(void)
+{
+	const size_t len = 0x0b6524u + 8u * 8u;
+	static const uint32_t rec[4][2] = { { 256, 1 }, { 512, 1 }, { 256, 4 },
+		{ 256, 8 } };
+	uint8_t *blob = calloc(1, len);
+	uint64_t ev[AR9311_AE_TONE_TABLE_MAX];
+	unsigned n, i;
+	int f = 0;
+
+	if (!blob)
+		return 1;
+	put_le32(blob + 0x0b6508u, 4);
+	for (i = 0; i < 4; i++) {
+		put_le32(blob + 0x0b6524u + i * 8u, rec[i][0]);
+		put_le32(blob + 0x0b6524u + i * 8u + 4u, rec[i][1]);
+	}
+	n = ar9311_ae_tone_table(blob, len, ev);
+	f += expect("tone: table read", n == 4 && ev[0] == 256 && ev[3] == 2048);
+	f += expect("tone: on an entry", ar9311_ae_tone_scalar(ev, n, 2.0) == 256);
+	f += expect("tone: between entries",
+		ar9311_ae_tone_scalar(ev, n, 3.0) == 384);
+	f += expect("tone: clamped at both ends",
+		ar9311_ae_tone_scalar(ev, n, 0.5) == 0 &&
+		ar9311_ae_tone_scalar(ev, n, 100.0) == 3 * 256);
+	f += expect("tone: a short file has no table",
+		ar9311_ae_tone_table(blob, 0x0b6524u + 8u, ev) == 0);
+	put_le32(blob + 0x0b6524u + 2 * 8u + 4u, 1);   /* falls: 512, then 256 */
+	f += expect("tone: a falling table is refused",
+		ar9311_ae_tone_table(blob, len, ev) == 0);
+	free(blob);
+	return f;
+}
+
 int main(void)
 {
 	int failures = test_gain_and_meter() + test_split() + test_step() +
-		test_flicker() + test_ev() + test_saturation_by_gain();
+		test_flicker() + test_ev() + test_saturation_by_gain() +
+		test_tone();
 
 	printf("ar9311 ae: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

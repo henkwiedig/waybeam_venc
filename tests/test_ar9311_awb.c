@@ -68,48 +68,100 @@ static int near(uint32_t v, uint32_t want, uint32_t tol)
 	return v + tol >= want && v <= want + tol;
 }
 
+/* Points of the locus: warm, mid, daylight. */
+enum { WARM, MID, DAY };
+
 static int test_estimate(const Ar9311AwbSensor *s)
 {
+	const double all = AR9311_AWB_T_MIN;
 	Ar9311AwbEstimate e;
 	Ar9311AwbGains g;
 	int f = 0;
 
-	fill(100, s->day_rg, s->day_bg);
+	fill(100, s->rg[DAY], s->bg[DAY]);
 	f += expect("daylight grey is found",
-		ar9311_awb_estimate(g_rro, s, &e) == 0 && fabs(e.t - 1.0) < 0.01);
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && fabs(e.t - 2.0) < 0.01);
 	g = ar9311_awb_gains_for(&e);
-	f += expect("daylight grey gets the daylight gains",
-		near(g.red, 461, 2) && near(g.blue, 743, 3));
+	f += expect("daylight grey gets stock's daylight gains",
+		near(g.red, 537, 3) && near(g.blue, 474, 3));
 
-	fill(100, s->warm_rg, s->warm_bg);
+	fill(100, s->rg[MID], s->bg[MID]);
+	f += expect("dusk grey is found on the bend",
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && fabs(e.t - 1.0) < 0.01);
+	g = ar9311_awb_gains_for(&e);
+	f += expect("dusk grey gets stock's dusk gains",
+		near(g.red, 400, 2) && near(g.blue, 644, 3));
+
+	fill(100, s->rg[WARM], s->bg[WARM]);
 	f += expect("lamp-lit grey is found",
-		ar9311_awb_estimate(g_rro, s, &e) == 0 && fabs(e.t) < 0.01);
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && fabs(e.t) < 0.01);
 	g = ar9311_awb_gains_for(&e);
 	f += expect("lamp-lit grey gets the warm gains",
-		near(g.red, 310, 2) && near(g.blue, 962, 3));
+		near(g.red, 269, 2) && near(g.blue, 834, 3));
 
-	/* Half the frame a red object: off the line, so it does not count. */
-	fill(100, s->day_rg, s->day_bg);
-	paint(288, 100, 2.0, s->day_bg);
+	/* Half the frame a red object: off the locus, so it does not count. */
+	fill(100, s->rg[DAY], s->bg[DAY]);
+	paint(288, 100, 2.0, s->bg[DAY]);
 	f += expect("a red object does not pull the balance",
-		ar9311_awb_estimate(g_rro, s, &e) == 0 && fabs(e.t - 1.0) < 0.01 &&
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && fabs(e.t - 2.0) < 0.01 &&
 		e.zones == 288);
 
+	/* A bright lamp-lit sixth of the frame does not outvote the dim grey
+	 * of the rest: each zone counts once, (480 x 2 + 96 x 0) / 576. */
+	fill(40, s->rg[DAY], s->bg[DAY]);
+	paint(96, 200, s->rg[WARM], s->bg[WARM]);
+	f += expect("a bright warm patch does not outvote the grey",
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 &&
+		e.t > 1.65 && e.t < 1.68);
+
+	/* A sunny garden: half its zones orange and brown objects, which sit
+	 * on the warm end of the locus.  Counted, they pull daylight halfway
+	 * to the lamp; at a daylight exposure they are left out. */
+	fill(100, s->rg[DAY], s->bg[DAY]);
+	paint(288, 100, s->rg[WARM] * 1.05, s->bg[WARM]);
+	f += expect("orange objects pull a dim scene warm",
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && e.t < 1.1);
+	f += expect("in daylight they are not greys",
+		ar9311_awb_estimate(g_rro, s, ar9311_awb_floor_for(100 * 256), &e) == 0 &&
+		fabs(e.t - 2.0) < 0.01 && e.zones == 288);
+
+	/* Nothing daylight-coloured in a bright frame (a sunset): it still
+	 * balances, on the whole locus. */
+	fill(100, s->rg[WARM], s->bg[WARM]);
+	f += expect("a bright warm scene falls back to the whole locus",
+		ar9311_awb_estimate(g_rro, s, ar9311_awb_floor_for(100 * 256), &e) == 0 &&
+		fabs(e.t) < 0.01);
+
 	/* Clipped and dark zones are ignored, whatever their colour. */
-	fill(100, s->day_rg, s->day_bg);
-	paint(200, 250, s->warm_rg, s->warm_bg);
-	paint(100, 4, s->warm_rg, s->warm_bg);
+	fill(100, s->rg[DAY], s->bg[DAY]);
+	paint(200, 250, s->rg[WARM], s->bg[WARM]);
+	paint(100, 4, s->rg[WARM], s->bg[WARM]);
 	f += expect("clipped and dark zones are ignored",
-		ar9311_awb_estimate(g_rro, s, &e) == 0 && fabs(e.t - 1.0) < 0.01);
+		ar9311_awb_estimate(g_rro, s, all, &e) == 0 && fabs(e.t - 2.0) < 0.01);
 
 	/* A frame of saturated colour has nothing neutral to go by. */
 	fill(100, 2.0, 0.1);
 	f += expect("no neutral zones: no estimate",
-		ar9311_awb_estimate(g_rro, s, &e) != 0);
+		ar9311_awb_estimate(g_rro, s, all, &e) != 0);
 
 	memset(g_rro, 0, sizeof(g_rro));
 	f += expect("an empty grid is rejected",
-		ar9311_awb_estimate(g_rro, s, &e) != 0);
+		ar9311_awb_estimate(g_rro, s, all, &e) != 0);
+	return f;
+}
+
+static int test_floor(void)
+{
+	int f = 0;
+
+	f += expect("sunshine: the daylight floor",
+		fabs(ar9311_awb_floor_for(90 * 256) - 1.2) < 1e-9);
+	f += expect("a lit room: the whole locus",
+		ar9311_awb_floor_for(390 * 256) == AR9311_AWB_T_MIN);
+	f += expect("no AE: the whole locus",
+		ar9311_awb_floor_for(-1) == AR9311_AWB_T_MIN);
+	f += expect("between, the floor ramps",
+		fabs(ar9311_awb_floor_for(220 * 256) - 0.35) < 1e-9);
 	return f;
 }
 
@@ -141,16 +193,36 @@ static int test_ct(const Ar9311AwbSensor *s)
 
 	e = ar9311_awb_at_ct(s, 2800);
 	f += expect("2800 K is the warm point", fabs(e.t) < 1e-6);
+	e = ar9311_awb_at_ct(s, 4000);
+	g = ar9311_awb_gains_for(&e);
+	f += expect("4000 K is the mid point",
+		fabs(e.t - 1.0) < 1e-6 && near(g.red, 400, 2) && near(g.blue, 644, 3));
 	e = ar9311_awb_at_ct(s, 6500);
 	g = ar9311_awb_gains_for(&e);
 	f += expect("6500 K is the daylight point",
-		fabs(e.t - 1.0) < 1e-6 && near(g.red, 461, 2) && near(g.blue, 743, 3));
-	e = ar9311_awb_at_ct(s, 4500);
-	f += expect("colour temperature round-trips",
-		near(ar9311_awb_ct_of(&e), 4500, 2));
+		fabs(e.t - 2.0) < 1e-6 && near(g.red, 537, 2) && near(g.blue, 474, 2));
+	e = ar9311_awb_at_ct(s, 3400);
+	f += expect("colour temperature round-trips below mid",
+		near(ar9311_awb_ct_of(&e), 3400, 2));
+	e = ar9311_awb_at_ct(s, 5200);
+	f += expect("colour temperature round-trips above mid",
+		near(ar9311_awb_ct_of(&e), 5200, 2));
 	e = ar9311_awb_at_ct(s, 100000);
 	f += expect("extreme colour temperatures clamp",
-		e.t <= 1.8 + 1e-9 && e.t > 1.0);
+		fabs(e.t - AR9311_AWB_T_MAX) < 1e-9 &&
+		fabs(ar9311_awb_at_ct(s, 1000).t - AR9311_AWB_T_MIN) < 1e-9);
+
+	g.red = 537;
+	g.blue = 474;
+	f += expect("stock's daylight gains are 6500 K",
+		near(ar9311_awb_ct_of_gains(s, &g), 6500, 30));
+	g.red = 399;
+	g.blue = 646;
+	f += expect("stock's dusk gains are 4000 K",
+		near(ar9311_awb_ct_of_gains(s, &g), 4000, 30));
+	g.red = 0;
+	f += expect("no gains, no colour temperature",
+		ar9311_awb_ct_of_gains(s, &g) == 0);
 	return f;
 }
 
@@ -165,6 +237,7 @@ int main(void)
 	if (!s)
 		return 1;
 	f += test_estimate(s);
+	f += test_floor();
 	f += test_step();
 	f += test_ct(s);
 	printf("ar9311 awb: %s\n", f ? "FAILED" : "ok");
