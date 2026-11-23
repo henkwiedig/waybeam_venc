@@ -1,5 +1,45 @@
 # History
 
+## [0.100.0] - 2026-11-23
+
+AR9311 strips: **the bitrate follows the strips' quality** (new
+`video0.stripBalance`).  `contract_version` moves to **0.43.0** (additive).
+
+- **Why.**  After a flight with 0.99.0 the two strips' seam (line 576)
+  stood out more.  Each strip has its own encoder and rate control, and
+  each got the bitrate by the lines it encodes, so the busier bottom half
+  (ground under sky) was quantised harder: slice QP 29 above the seam and
+  37 below at ~12 Mbit/s, detail across the seam a third down.  0.99.0's
+  sharper picture widened a gap that was there before (6 QP on an 11-14
+  flight).
+- **What.**  The join reads each strip's slice QP; every half second the
+  strips' mean QPs (IDR pictures left out) move a bias per strip, and the
+  bitrate is shared as encoded lines x 2^(bias/6), at most half or twice
+  the share by lines.  `video0.stripBalance` (0..100, restart) is the
+  share of the gap to close, assuming 6 QP per halving of a strip's bits.
+  The default is 0, the split by lines as flown so far; testers can try
+  other values from the goggles' menu (developer mode).  `video0.bitrate`, and a
+  live change of it, stays the total.  The 10 s strips log line now gives
+  each strip's mean QP and share.
+- **Cost: latency.**  The last strip is sent after the camera has
+  finished, the others while it is still writing, so bits moved into the
+  last strip delay the picture by their time on the radio.  P1 bench at
+  22 Mbit/s, plain top and busy bottom, capture -> goggles (A/B
+  alternated): 0 22.4 ms at QP 19.9/24.2, 50 23.6 ms at 20.4/23.6, 100
+  26.2 ms at 22.0/22.5 (22 % / 78 % of the bitrate).  Only a quarter of
+  this gap closed at 50: the plain top strip had not spent its share
+  (20.7 Mbit/s sent at 0, 21.6 at 100), so taking bits from it hardly
+  coarsened it.  Merge errors 0, out of step 0 throughout.
+- **Tests:** the merge reads the P1 fixture's slice QPs (checked against
+  ffmpeg's `trace_headers`); the split with no bias equals the old split
+  by lines for 2-4 strips with and without overlap; the balance's first
+  step, convergence (also with a rate control twice as steep), half and
+  no balance, the clamps and the deadband.
+- **Note on 0.99.0:** the night difference it left open ("stock's AE
+  aiming darker in the dark") is stock's AE target table, which falls
+  past exposure index 200 (SC231AI: 28 there, 10 at 500).  Ours keeps its
+  target in the dark on purpose, for the shadow detail.
+
 ## [0.99.0] - 2026-11-22
 
 AR9311 (SC231AI and NT99235): **the picture like stock.**

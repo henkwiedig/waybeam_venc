@@ -45,6 +45,7 @@
     "subFrameSync": false,
     "strips": 0,
     "stripOverlap": 1,
+    "stripBalance": 0,
     "resilience": "off",
     "intraRefreshQp": 0,
     "zoomX": 0.5,

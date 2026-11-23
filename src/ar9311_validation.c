@@ -48,6 +48,8 @@ static const char *validate_video(const VencConfig *cfg)
 		return "AR9311 video0.strips must be 0..4";
 	if (v->strip_overlap > AR9311_STRIPS_OVERLAP_MAX)
 		return "AR9311 video0.strip_overlap must be 0..2";
+	if (v->strip_balance > VENC_STRIP_BALANCE_MAX)
+		return "AR9311 video0.strip_balance must be 0..100";
 	return NULL;
 }
 

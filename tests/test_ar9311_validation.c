@@ -143,6 +143,14 @@ static int test_validation(void)
 	failures += expect_config("ar9311_reject_strip_overlap_3", &cfg, 0);
 
 	valid_config(&cfg);
+	cfg.video0.strip_balance = 100;
+	failures += expect_config("ar9311_accept_strip_balance_100", &cfg, 1);
+
+	valid_config(&cfg);
+	cfg.video0.strip_balance = 101;
+	failures += expect_config("ar9311_reject_strip_balance_101", &cfg, 0);
+
+	valid_config(&cfg);
 	cfg.audio.enabled = true;
 	failures += expect_config("ar9311_reject_audio", &cfg, 0);
 
@@ -279,10 +287,173 @@ static int test_strips_plan(void)
 	return failures;
 }
 
+/* Strips whose QP follows 6 per halving of their bits times @p steep: the
+ * QPs @p qp0 they show at the even split, moved by the biased shares. */
+static void strips_qp_model(const Ar9311StripPlan *p, const float *qp0,
+	const uint32_t *even, const uint32_t *share, float steep, float *qp)
+{
+	int k;
+
+	for (k = 0; k < p->count; k++)
+		qp[k] = qp0[k] - steep * 6.0f *
+			(float)log2((double)share[k] / (double)even[k]);
+}
+
+/* The bitrate's shares: with no bias exactly the split by coded lines (the
+ * old split, copied here), always adding up; the balance moves the strips
+ * to equal QPs, centred, clamped, and not at all inside its deadband. */
+static int test_strips_rate(void)
+{
+	static const uint32_t kbps[] = { 300, 8000, 12345, 30000 };
+	Ar9311StripPlan p;
+	float bias[AR9311_STRIPS_MAX], qp[AR9311_STRIPS_MAX];
+	uint32_t share[AR9311_STRIPS_MAX], even[AR9311_STRIPS_MAX];
+	char detail[96];
+	int failures = 0, n, o, i, k, step, ok = 1;
+
+	memset(bias, 0, sizeof(bias));
+	for (n = 2; n <= 4; n++)
+		for (o = 0; o <= 1; o++)
+			for (i = 0; i < 4; i++) {
+				uint64_t coded = 0;
+				uint32_t total, left, want;
+
+				if (ar9311_strips_plan(n, 1080, (uint32_t)o, 1458, 948,
+					&p) != 0) {
+					ok = 0;
+					continue;
+				}
+				ar9311_strips_split(&p, bias, kbps[i], share);
+				for (k = 0; k < n; k++)
+					coded += p.enc_height[k];
+				total = left = (uint32_t)((uint64_t)kbps[i] * coded /
+					1080);
+				for (k = 0; k < n; k++) {
+					want = k == n - 1 ? left : (uint32_t)((uint64_t)total *
+						p.enc_height[k] / coded);
+					left -= want;
+					ok &= share[k] == want;
+				}
+			}
+	failures += expect("ar9311_strips_split_unbiased_by_lines", ok, NULL);
+
+	/* the flight's 2 strips with overlap: 29 above the seam, 37 below */
+	(void)ar9311_strips_plan(2, 1080, 1, 1458, 948, &p);
+	ar9311_strips_split(&p, bias, 12000, even);
+	qp[0] = 29.0f;
+	qp[1] = 37.0f;
+	ok = ar9311_strips_balance(&p, qp, 1.0f, bias) == 1 && bias[0] < 0.0f &&
+		bias[1] > 0.0f &&
+		fabsf(640.0f * bias[0] + 568.0f * bias[1]) < 0.01f;
+	ar9311_strips_split(&p, bias, 12000, share);
+	snprintf(detail, sizeof(detail), "bias %.2f/%.2f, %u/%u kbps",
+		(double)bias[0], (double)bias[1], share[0], share[1]);
+	failures += expect("ar9311_strips_balance_first_step",
+		ok && share[1] > even[1] && share[0] + share[1] == even[0] + even[1],
+		detail);
+
+	/* to within the deadband in a few steps, and still with a rate control
+	 * twice as steep as 6 QP a halving */
+	for (i = 0; i < 2; i++) {
+		static const float qp0[2] = { 29.0f, 37.0f };
+		float steep = i ? 2.0f : 1.0f;
+
+		memset(bias, 0, sizeof(bias));
+		memcpy(qp, qp0, sizeof(qp0));
+		for (step = 0; step < 20 &&
+		     ar9311_strips_balance(&p, qp, 1.0f, bias); step++) {
+			ar9311_strips_split(&p, bias, 12000, share);
+			strips_qp_model(&p, qp0, even, share, steep, qp);
+		}
+		snprintf(detail, sizeof(detail), "%d steps, QP %.2f/%.2f, %u/%u "
+			"kbps", step, (double)qp[0], (double)qp[1], share[0],
+			share[1]);
+		failures += expect(i ? "ar9311_strips_balance_converges_steep" :
+			"ar9311_strips_balance_converges", step < 10 &&
+			fabsf(qp[0] - qp[1]) < 2.0f * AR9311_STRIPS_BIAS_DEADBAND,
+			detail);
+	}
+
+	/* half strength closes about half of the gap; none leaves the split
+	 * by lines alone and takes a bias back to it */
+	for (i = 0; i < 2; i++) {
+		static const float qp0[2] = { 29.0f, 37.0f };
+
+		memset(bias, 0, sizeof(bias));
+		if (i) {
+			bias[0] = -3.0f;
+			bias[1] = 3.4f;
+		}
+		memcpy(qp, qp0, sizeof(qp0));
+		ar9311_strips_split(&p, bias, 12000, share);
+		strips_qp_model(&p, qp0, even, share, 1.0f, qp);
+		for (step = 0; step < 20 && ar9311_strips_balance(&p, qp,
+			i ? 0.0f : 0.5f, bias); step++) {
+			ar9311_strips_split(&p, bias, 12000, share);
+			strips_qp_model(&p, qp0, even, share, 1.0f, qp);
+		}
+		snprintf(detail, sizeof(detail), "%d steps, QP %.2f/%.2f, bias "
+			"%.2f/%.2f", step, (double)qp[0], (double)qp[1],
+			(double)bias[0], (double)bias[1]);
+		failures += expect(i ? "ar9311_strips_balance_off_back_to_lines" :
+			"ar9311_strips_balance_half", step < 12 && (i ?
+			fabsf(bias[0]) < AR9311_STRIPS_BIAS_DEADBAND &&
+			fabsf(bias[1]) < AR9311_STRIPS_BIAS_DEADBAND :
+			qp[1] - qp[0] > 3.0f && qp[1] - qp[0] < 5.0f), detail);
+	}
+	memset(bias, 0, sizeof(bias));
+	qp[0] = 29.0f;
+	qp[1] = 37.0f;
+	failures += expect("ar9311_strips_balance_off_stays_by_lines",
+		ar9311_strips_balance(&p, qp, 0.0f, bias) == 0 &&
+		bias[0] == 0.0f && bias[1] == 0.0f, NULL);
+
+	/* a gap no share can close: held at half/twice by lines */
+	memset(bias, 0, sizeof(bias));
+	qp[0] = 10.0f;
+	qp[1] = 51.0f;
+	for (step = 0; step < 20; step++)
+		(void)ar9311_strips_balance(&p, qp, 1.0f, bias);
+	ar9311_strips_split(&p, bias, 12000, share);
+	snprintf(detail, sizeof(detail), "bias %.2f/%.2f, %u/%u kbps",
+		(double)bias[0], (double)bias[1], share[0], share[1]);
+	failures += expect("ar9311_strips_balance_clamped",
+		bias[0] >= -AR9311_STRIPS_BIAS_MAX &&
+		bias[1] <= AR9311_STRIPS_BIAS_MAX &&
+		(double)share[1] / 568.0 <= 4.0 * share[0] / 640.0 + 0.01 &&
+		share[0] + share[1] == even[0] + even[1], detail);
+
+	/* inside the deadband nothing moves */
+	memset(bias, 0, sizeof(bias));
+	bias[0] = -1.0f;
+	bias[1] = 1.0f;
+	qp[0] = 33.0f;
+	qp[1] = 33.8f;
+	failures += expect("ar9311_strips_balance_deadband",
+		ar9311_strips_balance(&p, qp, 1.0f, bias) == 0 && bias[0] == -1.0f &&
+		bias[1] == 1.0f, NULL);
+
+	/* 4 strips, uneven biases: the shares still add up */
+	(void)ar9311_strips_plan(4, 1080, 1, 1458, 948, &p);
+	bias[0] = -6.0f;
+	bias[1] = 2.5f;
+	bias[2] = 0.3f;
+	bias[3] = 6.0f;
+	ar9311_strips_split(&p, bias, 12345, share);
+	memset(bias, 0, sizeof(bias));
+	ar9311_strips_split(&p, bias, 12345, even);
+	failures += expect("ar9311_strips_split_biased_adds_up",
+		share[0] + share[1] + share[2] + share[3] ==
+		even[0] + even[1] + even[2] + even[3] && share[0] < even[0] &&
+		share[3] > even[3], NULL);
+	return failures;
+}
+
 int main(void)
 {
 	int failures = test_validation() + test_mutability() +
-		test_refresh_plan() + test_sfs_schedule() + test_strips_plan();
+		test_refresh_plan() + test_sfs_schedule() + test_strips_plan() +
+		test_strips_rate();
 
 	printf("ar9311 validation: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;

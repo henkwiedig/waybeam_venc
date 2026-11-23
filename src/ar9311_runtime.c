@@ -137,6 +137,16 @@ typedef struct {
 	uint64_t strip_merge_errors, strip_out_of_step, strip_abandoned;
 	uint64_t strip_t_first_sum, strip_t_whole_sum, strip_t_n;
 	uint64_t strip_last_report_us;
+	/* Bitrate shares (ar9311_strips_balance()): the biases and each
+	 * encoder's share, set under g_ar9311_rate_mutex, as the httpd thread
+	 * sets the bitrate too.  QP sums of the joined non-IDR pictures since
+	 * the last balance step and since the last report. */
+	float strip_bias[AR9311_STRIPS_MAX];
+	uint32_t strip_share[AR9311_STRIPS_MAX];
+	double strip_qp_sum[AR9311_STRIPS_MAX], strip_qp_report[AR9311_STRIPS_MAX];
+	uint32_t strip_qp_n, strip_qp_report_n;
+	uint64_t strip_balance_us;
+	uint64_t strip_rate_errors;
 } Ar9311RunnerContext;
 
 /* The shared VencApplyCallbacks ABI carries no opaque pointer, so like every
@@ -147,6 +157,9 @@ static volatile sig_atomic_t g_ar9311_stop;
 
 static Ar9311IntraRefreshStatus g_ar9311_intra_status;
 static pthread_mutex_t g_ar9311_status_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* The strip encoders' bitrates: set by the httpd thread (live bitrate) and
+ * by the encode loop (ar9311_strips_rebalance()). */
+static pthread_mutex_t g_ar9311_rate_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void ar9311_runtime_intra_refresh_status(Ar9311IntraRefreshStatus *out)
 {
@@ -165,44 +178,38 @@ static void ar9311_signal_handler(int signo)
 
 /* ── Live controls ───────────────────────────────────────────────────── */
 
-/* The strips' shares of @p kbps, by the lines each encodes, so that what is
- * left once the overlap rows are dropped comes to @p kbps. */
-static void ar9311_strips_split(const Ar9311StripPlan *plan, uint32_t kbps,
-	uint32_t *share)
+/* @p kbps shared out to the strip encoders by the current biases; under
+ * g_ar9311_rate_mutex. */
+static int ar9311_strips_set_rates(Ar9311RunnerContext *ctx, uint32_t kbps)
 {
-	uint64_t coded = 0;
-	uint32_t total, left;
+	uint32_t share[AR9311_STRIPS_MAX];
 	int k;
 
-	for (k = 0; k < plan->count; k++)
-		coded += plan->enc_height[k];
-	total = left = (uint32_t)((uint64_t)kbps * coded / AR9311_HEIGHT);
-	for (k = 0; k < plan->count; k++) {
-		share[k] = k == plan->count - 1 ? left :
-			(uint32_t)((uint64_t)total * plan->enc_height[k] / coded);
-		left -= share[k];
+	ar9311_strips_split(&ctx->plan, ctx->strip_bias, kbps, share);
+	for (k = 0; k < ctx->strips; k++) {
+		if (ar9311_encoder_set_bitrate(ctx->se[k], share[k]) != 0)
+			return -1;
+		ctx->strip_share[k] = share[k];
 	}
+	return 0;
 }
 
 static int ar9311_apply_bitrate(uint32_t kbps)
 {
 	Ar9311RunnerContext *ctx = g_ar9311_runner;
+	int rc = 0;
 
 	if (!ctx)
 		return -1;
-	if (ctx->strips) {
-		uint32_t share[AR9311_STRIPS_MAX];
-		int k;
-
-		ar9311_strips_split(&ctx->plan, kbps, share);
-		for (k = 0; k < ctx->strips; k++)
-			if (ar9311_encoder_set_bitrate(ctx->se[k], share[k]) != 0)
-				return -1;
-	} else if (ar9311_encoder_set_bitrate(&ctx->encoder, kbps) != 0) {
-		return -1;
-	}
-	__atomic_store_n(&ctx->live_bitrate, kbps, __ATOMIC_RELEASE);
-	return 0;
+	pthread_mutex_lock(&g_ar9311_rate_mutex);
+	if (ctx->strips)
+		rc = ar9311_strips_set_rates(ctx, kbps);
+	else
+		rc = ar9311_encoder_set_bitrate(&ctx->encoder, kbps);
+	if (rc == 0)
+		__atomic_store_n(&ctx->live_bitrate, kbps, __ATOMIC_RELEASE);
+	pthread_mutex_unlock(&g_ar9311_rate_mutex);
+	return rc != 0 ? -1 : 0;
 }
 
 static int ar9311_apply_verbose(bool on)
@@ -1024,6 +1031,11 @@ static void ar9311_plan_sfs(Ar9311RunnerContext *ctx,
 /* Where the camera's last line lands after its timestamp at depth 1
  * (measured, see AR9311_SFS_*), to report part times against. */
 #define AR9311_STRIP_LAST_LINE_US 15962u
+/* Bitrate balance (ar9311_strips_balance()): a step every half second, on
+ * at least a quarter second of pictures.  The encoders' rate buffer is
+ * 100 ms, so a step's new shares have settled long before the next. */
+#define AR9311_STRIP_BALANCE_US 500000u
+#define AR9311_STRIP_BALANCE_MIN_PICTURES 15u
 
 static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 	const Ar9311EncoderParams *params)
@@ -1058,11 +1070,16 @@ static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 	ctx->se[0] = &ctx->encoder;
 	for (k = 1; k < n; k++)
 		ctx->se[k] = &ctx->strip_enc[k - 1];
-	ar9311_strips_split(&ctx->plan, params->bitrate_kbps, share);
+	memset(ctx->strip_bias, 0, sizeof(ctx->strip_bias));
+	ar9311_strips_split(&ctx->plan, ctx->strip_bias, params->bitrate_kbps,
+		share);
 	if (overlap)
 		printf("> [ar9311] strips: %u row(s) of 64 lines past each seam, "
 			"sliced off and dropped; loop filter across slice edges\n",
 			overlap);
+	printf("> [ar9311] strips: the bitrate closes %u %% of the QP gap "
+		"between the strips (video0.stripBalance)\n",
+		ctx->config.video0.strip_balance);
 	for (k = 0; k < n; k++) {
 		Ar9311EncoderParams p = *params;
 		Ar9311Geometry g = ctx->capture.geo;
@@ -1077,7 +1094,7 @@ static int ar9311_strips_start(Ar9311RunnerContext *ctx,
 		p.slice_ctus = ctx->plan.slice_rows[k] *
 			((AR9311_WIDTH + AR9311_STRIPS_ROW_LINES - 1) /
 				AR9311_STRIPS_ROW_LINES);
-		p.bitrate_kbps = share[k];
+		p.bitrate_kbps = ctx->strip_share[k] = share[k];
 		if (k < n - 1) {
 			p.sfs_row_us = 0;
 			p.sfs_start_us = 0;
@@ -1180,6 +1197,23 @@ static void ar9311_strips_fail(Ar9311RunnerContext *ctx, uint64_t *counter,
 	__atomic_store_n(&ctx->strip_idr_pending, 1, __ATOMIC_RELEASE);
 }
 
+/* The joined picture's QPs, strip by strip, for the balance and the
+ * report.  An IDR's QP is the rate control's opening guess, not a measure
+ * of what the strip needs: left out. */
+static void ar9311_strips_count_qp(Ar9311RunnerContext *ctx)
+{
+	int k;
+
+	if (ctx->merge.idr[0])
+		return;
+	for (k = 0; k < ctx->strips; k++) {
+		ctx->strip_qp_sum[k] += ctx->merge.qp[k];
+		ctx->strip_qp_report[k] += ctx->merge.qp[k];
+	}
+	ctx->strip_qp_n++;
+	ctx->strip_qp_report_n++;
+}
+
 static int ar9311_strips_take(Ar9311RunnerContext *ctx, int k,
 	const uint8_t *data, size_t len, uint64_t ts)
 {
@@ -1228,6 +1262,7 @@ static int ar9311_strips_take(Ar9311RunnerContext *ctx, int k,
 		ctx->strip_t_n++;
 		ctx->last_frame_us = now;
 		ctx->strip_next = 0;
+		ar9311_strips_count_qp(ctx);
 	}
 	return 0;
 }
@@ -1352,24 +1387,71 @@ static int ar9311_strips_issue(Ar9311RunnerContext *ctx, uint64_t now,
 	}
 }
 
+/* A balance step: the strips' mean QPs since the last one move the biases,
+ * and moved biases share the live bitrate out anew. */
+static void ar9311_strips_rebalance(Ar9311RunnerContext *ctx, uint64_t now)
+{
+	float qp[AR9311_STRIPS_MAX];
+	int k;
+
+	if (now - ctx->strip_balance_us < AR9311_STRIP_BALANCE_US)
+		return;
+	ctx->strip_balance_us = now;
+	if (ctx->strip_qp_n >= AR9311_STRIP_BALANCE_MIN_PICTURES) {
+		for (k = 0; k < ctx->strips; k++)
+			qp[k] = (float)(ctx->strip_qp_sum[k] / ctx->strip_qp_n);
+		pthread_mutex_lock(&g_ar9311_rate_mutex);
+		if (ar9311_strips_balance(&ctx->plan, qp,
+			(float)ctx->config.video0.strip_balance / 100.0f,
+			ctx->strip_bias) &&
+		    ar9311_strips_set_rates(ctx, __atomic_load_n(
+			&ctx->live_bitrate, __ATOMIC_ACQUIRE)) != 0 &&
+		    (ctx->strip_rate_errors++ < 10 ||
+		     ctx->strip_rate_errors % 600 == 0))
+			fprintf(stderr, "WARN: [ar9311] strips: setting the "
+				"shares of the bitrate failed (#%llu)\n",
+				(unsigned long long)ctx->strip_rate_errors);
+		pthread_mutex_unlock(&g_ar9311_rate_mutex);
+	}
+	memset(ctx->strip_qp_sum, 0, sizeof(ctx->strip_qp_sum));
+	ctx->strip_qp_n = 0;
+}
+
 static void ar9311_strips_report(Ar9311RunnerContext *ctx, uint64_t now)
 {
+	char qp[64], kbps[64];
+	size_t qn = 0, kn = 0;
+	int k;
+
 	if (now - ctx->strip_last_report_us < 10000000ull)
 		return;
+	qp[0] = kbps[0] = '\0';
+	pthread_mutex_lock(&g_ar9311_rate_mutex);
+	for (k = 0; k < ctx->strips; k++) {
+		qn += (size_t)snprintf(qp + qn, sizeof(qp) - qn, "%s%.1f",
+			k ? "/" : "", ctx->strip_qp_report_n ?
+			ctx->strip_qp_report[k] / ctx->strip_qp_report_n : 0.0);
+		kn += (size_t)snprintf(kbps + kn, sizeof(kbps) - kn, "%s%u",
+			k ? "/" : "", ctx->strip_share[k]);
+	}
+	pthread_mutex_unlock(&g_ar9311_rate_mutex);
 	if (ctx->strip_last_report_us && ctx->strip_t_n)
 		printf("> [ar9311] strips: %llu pictures in 10 s, first part ready "
 			"%+.2f ms, whole picture %+.2f ms after the camera's last "
-			"line (avg); merge errors %llu, out of step %llu, "
-			"abandoned %llu\n",
+			"line (avg); QP %s at %s kbps; merge errors %llu, out of "
+			"step %llu, abandoned %llu\n",
 			(unsigned long long)ctx->strip_t_n,
 			(double)ctx->strip_t_first_sum / (double)ctx->strip_t_n /
 				1000.0 - AR9311_STRIP_LAST_LINE_US / 1000.0,
 			(double)ctx->strip_t_whole_sum / (double)ctx->strip_t_n /
 				1000.0 - AR9311_STRIP_LAST_LINE_US / 1000.0,
+			qp, kbps,
 			(unsigned long long)ctx->strip_merge_errors,
 			(unsigned long long)ctx->strip_out_of_step,
 			(unsigned long long)ctx->strip_abandoned);
 	ctx->strip_t_first_sum = ctx->strip_t_whole_sum = ctx->strip_t_n = 0;
+	memset(ctx->strip_qp_report, 0, sizeof(ctx->strip_qp_report));
+	ctx->strip_qp_report_n = 0;
 	ctx->strip_last_report_us = now;
 }
 
@@ -1427,6 +1509,7 @@ static int ar9311_run_strips(Ar9311RunnerContext *ctx)
 			break;
 		}
 		now = wb_monotonic_us();
+		ar9311_strips_rebalance(ctx, now);
 		ar9311_strips_report(ctx, now);
 		if (now - ctx->last_frame_us > AR9311_STALL_MS * 1000ull) {
 			fprintf(stderr, "ERROR: [ar9311] no encoded frame for %d ms: "

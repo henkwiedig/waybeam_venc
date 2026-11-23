@@ -83,6 +83,9 @@ typedef struct {
 	/* last picture of each strip, for the lock-step check */
 	int idr[AR9311_MERGE_MAX_STRIPS];
 	uint32_t poc[AR9311_MERGE_MAX_STRIPS];
+	/* and the QP its rate control chose for it: the slice QP of its first
+	 * slice sent (ar9311_strips_balance()) */
+	int qp[AR9311_MERGE_MAX_STRIPS];
 	/* scratch */
 	uint8_t *rbsp, *out_rbsp;
 	size_t scratch_len;

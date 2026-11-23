@@ -430,6 +430,7 @@ static int parse_pps(const uint8_t *rbsp, size_t len, Ar9311HevcPps *p)
 typedef struct {
 	uint32_t first, no_output, pps_id, addr, slice_type, poc_lsb, idr;
 	uint32_t dependent;
+	int32_t qp_delta;        /* slice_qp_delta */
 	size_t after_addr_bit;   /* first bit after slice_segment_address */
 	size_t end_bit;          /* first bit of byte_alignment() */
 	size_t data_byte;        /* slice data start */
@@ -552,7 +553,7 @@ static int parse_slice(const uint8_t *rbsp, size_t len,
 			}
 			br_ue(&b);
 		}
-		br_se(&b);
+		h->qp_delta = br_se(&b);
 		if (p->slice_chroma_qp_offsets_present) {
 			br_se(&b);
 			br_se(&b);
@@ -803,8 +804,11 @@ size_t ar9311_merge_strip(Ar9311Merge *m, int k, const uint8_t *au,
 					return m->error = "a slice runs into the overlap", 0;
 				continue;
 			}
-			if (!kept++ && h.addr != keep0)
-				return m->error = "a slice runs into the overlap", 0;
+			if (!kept++) {
+				if (h.addr != keep0)
+					return m->error = "a slice runs into the overlap", 0;
+				m->qp[k] = 26 + m->pps[k].init_qp_minus26 + h.qp_delta;
+			}
 			addr = h.addr - keep0;
 			for (j = 0; j < k; j++)
 				addr += w_ctb * (ctbs(m->coded_h[j], s->ctb_log2) -

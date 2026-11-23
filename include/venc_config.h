@@ -72,6 +72,7 @@ extern "C" {
 #define VENC_SLICE_COUNT_MAX 32
 #define VENC_STRIPS_MAX 4
 #define VENC_STRIP_OVERLAP_MAX 2
+#define VENC_STRIP_BALANCE_MAX 100
 
 /* ── Sub-structs mirroring JSON sections ─────────────────────────────── */
 
@@ -177,6 +178,9 @@ typedef struct {
 	                            * again, so its motion vectors find the
 	                            * neighbour's content there instead of
 	                            * padding; 0..VENC_STRIP_OVERLAP_MAX. */
+	uint32_t strip_balance;    /* AR9311 strips: % of the strips' QP gap
+	                            * the bitrate shares close; 0 = shared by
+	                            * lines, 0..VENC_STRIP_BALANCE_MAX. */
 	/* Derived from `resilience` preset only.  Not part of the JSON
 	 * schema or HTTP API — written exclusively by
 	 * apply_resilience_preset() at load time.  Do not parse from JSON,

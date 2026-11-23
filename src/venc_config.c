@@ -184,6 +184,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.sub_frame_sync = false;
 	cfg->video0.strips = 0;
 	cfg->video0.strip_overlap = 1;
+	cfg->video0.strip_balance = 0;
 
 	/* intra refresh (video0) — disabled by default; mode-driven */
 	safe_strcpy(cfg->video0.intra_refresh_mode,
@@ -692,6 +693,9 @@ static void load_video0(const cJSON *root, VencConfigVideo *v)
 		st = json_get_int(obj, "stripOverlap", (int)v->strip_overlap);
 		if (st >= 0 && st <= VENC_STRIP_OVERLAP_MAX)
 			v->strip_overlap = (uint32_t)st;
+		st = json_get_int(obj, "stripBalance", (int)v->strip_balance);
+		if (st >= 0 && st <= VENC_STRIP_BALANCE_MAX)
+			v->strip_balance = (uint32_t)st;
 	}
 
 	/* Resilience preset is the sole driver of intra-refresh + SVC-T
@@ -1467,6 +1471,7 @@ static void render_video0(PrettyBuf *p, const VencConfig *cfg, int is_last)
 	pp_field_bool(p,   2, "subFrameSync",   cfg->video0.sub_frame_sync,  0);
 	pp_field_uint(p,   2, "strips",         cfg->video0.strips,          0);
 	pp_field_uint(p,   2, "stripOverlap",   cfg->video0.strip_overlap,   0);
+	pp_field_uint(p,   2, "stripBalance",   cfg->video0.strip_balance,   0);
 	pp_field_string(p, 2, "resilience",        cfg->video0.resilience,          0);
 	pp_field_uint(p,   2, "intraRefreshQp", cfg->video0.intra_refresh_qp, 0);
 	pp_field_double(p, 2, "zoomX",             cfg->video0.zoom_x,              0);
@@ -1732,6 +1737,8 @@ static cJSON *config_to_cjson(const VencConfig *cfg)
 		cJSON_AddNumberToObject(vid, "strips", cfg->video0.strips);
 		cJSON_AddNumberToObject(vid, "stripOverlap",
 			cfg->video0.strip_overlap);
+		cJSON_AddNumberToObject(vid, "stripBalance",
+			cfg->video0.strip_balance);
 		cJSON_AddStringToObject(vid, "resilience", cfg->video0.resilience);
 		cJSON_AddNumberToObject(vid, "intraRefreshQp",
 			cfg->video0.intra_refresh_qp);

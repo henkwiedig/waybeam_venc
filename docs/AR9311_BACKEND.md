@@ -163,11 +163,38 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
   Every strip but the last is queued at its last band's release time in the
   sub-frame sync schedule (2 strips: the top at +9042 us); the last one
   follows the camera from its first band with sub-frame sync (2 strips:
-  +9990 us).  The bitrate is split by the lines each strip encodes; IDR
-  requests go to every
-  encoder right before a frame's first strip is queued, so all strips turn
-  IDR together.  Needs sub-frame sync and a frame-shm output; without either
-  waybeam warns and encodes one picture.
+  +9990 us).  IDR requests go to every encoder right before a frame's
+  first strip is queued, so all strips turn IDR together.  Needs sub-frame
+  sync and a frame-shm output; without either waybeam warns and encodes
+  one picture.
+- **Bitrate** (`video0.stripBalance`, restart, 0..100, default 0): every
+  strip has its own rate control, so the shares decide how the strips'
+  qualities compare.  Shared by encoded lines, a busy bottom half (ground
+  under sky) is quantised harder and the seam shows as a step in sharpness:
+  in a P1 flight (11-23, ~12 Mbit/s) the slice QP was 29 above the seam and
+  37 below, detail across the seam a third down.  The join reads each
+  strip's slice QP; every 0.5 s the strips' mean QPs move a bias per strip
+  (share = encoded lines x 2^(bias/6), `ar9311_strips_balance()`,
+  host-tested) toward closing `stripBalance` % of the gap, assuming 6 QP
+  per halving of the bits; at most half/twice the share by lines, IDR
+  pictures left out.  The bitrate is still the total, and an API change of
+  it keeps the biases.  What it costs is latency: the last strip is sent
+  after the camera has finished, so bits moved into it delay the picture by
+  their time on the radio (~1 ms per 4.5 kB a frame on the bench link).
+  Bench, 22 Mbit/s, plain top and busy bottom, capture -> goggles:
+
+  | stripBalance | QP top / bottom | shares | capture->rx |
+  | --- | --- | --- | --- |
+  | 0 | 19.9 / 24.2 | 53 / 47 % | 22.4 ms |
+  | 50 | 20.4 / 23.6 | 42 / 58 % | 23.6 |
+  | 100 | 22.0 / 22.5 | 22 / 78 % | 26.2 |
+
+  Only a quarter of the gap closed at 50: the plain top strip did not
+  spend its share by lines (sent 20.7 Mbit/s at 0, 21.6 at 100), so taking
+  bits from it hardly coarsened it.  The default stays 0, the split by
+  lines that has been flown; testers try other values from the goggles'
+  menu in developer mode.  The 10 s strips line of the log gives each
+  strip's mean QP and share.
 - **Join**: strip 0's SPS gets the full height; the other strips' VPS/SPS/PPS
   are dropped after a check that they match strip 0's, and each slice
   header is rewritten to first_slice_segment_in_pic_flag 0 and its CTU
@@ -203,7 +230,8 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
   step 1.3-1.6 against 1.2; 2.7-2.9 with 1-row slices and no filtering
   across them).  Cost: the first part +1.4 ms, the whole picture +1.8 ms
   after the camera's last line, ~12 % more lines encoded (the bitrate
-  split makes up for the dropped bits).  A still scene gains nothing.
+  shares count encoded lines, which makes up for the dropped bits).  A
+  still scene gains nothing.
 - **Measured** on a P1 -> VRX Pro at ~22 Mbit/s (PI rate control, 2 x 60 s
   per setting; capture -> ground receiver, PixelPilot latency p50 / p99,
   vsync-lock target, drops per 10 s, tx write time per frame):
@@ -465,7 +493,7 @@ Exactly one mode, which is all the open camera chain delivers today:
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.awbMode`, `isp.awbCt`, `isp.awbFps` (white balance) | live |
 | `isp.aeFps` (AE decision rate) | restart |
-| `image.mirror`, `image.flip` (both = 180 degrees; at the sensor, encoder-side on a kernel without the orientation parameter), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+| `image.mirror`, `image.flip` (both = 180 degrees; at the sensor, encoder-side on a kernel without the orientation parameter), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap`, `video0.stripBalance` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.

@@ -54,6 +54,21 @@ typedef struct {
 	size_t len;
 } Au;
 
+/* Each strip's slice QP as the join read it, against @p want (read off the
+ * fixture with ffmpeg's trace_headers: 26 + init_qp_minus26 +
+ * slice_qp_delta). */
+static int check_qp(const char *tag, const Ar9311Merge *m, const int *want)
+{
+	char name[128];
+	int k, ok = 1;
+
+	for (k = 0; k < m->n; k++)
+		ok &= m->qp[k] == want[k];
+	snprintf(name, sizeof(name), "%s slice QP %d/%d%s", tag, m->qp[0],
+		m->qp[1], m->n > 2 ? "/..." : "");
+	return expect(name, ok, NULL);
+}
+
 /* Join one frame of @p n strips and check the result: strip 0 carries the
  * parameter sets with the full height, every other strip only its slice,
  * moved to its CTU offset with the slice data untouched, every slice with
@@ -141,6 +156,7 @@ static int check_frame(const char *tag, Ar9311Merge *m, int n,
 static int test_two(void)
 {
 	static const uint32_t heights[2] = { 576, 504 };
+	static const int qp_idr[2] = { 25, 25 }, qp_p[2] = { 26, 26 };
 	Au f0[2] = { { fx_two_s0_f0, sizeof(fx_two_s0_f0) },
 		{ fx_two_s1_f0, sizeof(fx_two_s1_f0) } };
 	Au f1[2] = { { fx_two_s0_f1, sizeof(fx_two_s0_f1) },
@@ -150,7 +166,9 @@ static int test_two(void)
 
 	ar9311_merge_init(&m, 2, heights, 0);
 	failures = check_frame("2 strips IDR", &m, 2, heights, f0, 0);
+	failures += check_qp("2 strips IDR", &m, qp_idr);
 	failures += check_frame("2 strips P", &m, 2, heights, f1, (uint32_t)-1);
+	failures += check_qp("2 strips P", &m, qp_p);
 	ar9311_merge_free(&m);
 	return failures;
 }
@@ -158,6 +176,7 @@ static int test_two(void)
 static int test_three(void)
 {
 	static const uint32_t heights[3] = { 384, 384, 312 };
+	static const int qp_idr[3] = { 25, 25, 25 }, qp_p[3] = { 26, 26, 26 };
 	Au f0[3] = { { fx_three_s0_f0, sizeof(fx_three_s0_f0) },
 		{ fx_three_s1_f0, sizeof(fx_three_s1_f0) },
 		{ fx_three_s2_f0, sizeof(fx_three_s2_f0) } };
@@ -169,7 +188,9 @@ static int test_three(void)
 
 	ar9311_merge_init(&m, 3, heights, 0);
 	failures = check_frame("3 strips IDR", &m, 3, heights, f0, 0);
+	failures += check_qp("3 strips IDR", &m, qp_idr);
 	failures += check_frame("3 strips P", &m, 3, heights, f1, (uint32_t)-1);
+	failures += check_qp("3 strips P", &m, qp_p);
 	ar9311_merge_free(&m);
 	return failures;
 }
@@ -299,6 +320,8 @@ static int test_overlap(void)
 		  { fx_ovl_s1_f0, sizeof(fx_ovl_s1_f0) } },
 		{ { fx_ovl_s0_f1, sizeof(fx_ovl_s0_f1) },
 		  { fx_ovl_s1_f1, sizeof(fx_ovl_s1_f1) } } };
+	/* each strip's own: the merge reads its first slice sent */
+	static const int qp[2][2] = { { 28, 27 }, { 18, 17 } };
 	static uint8_t out[4096], a[512], b[512];
 	Ar9311HevcSps sps;
 	Ar9311HevcPps pps;
@@ -365,6 +388,8 @@ static int test_overlap(void)
 		}
 		snprintf(name, sizeof(name), "overlap frame %d in step", f);
 		failures += expect(name, ar9311_merge_in_step(&m), NULL);
+		snprintf(name, sizeof(name), "overlap frame %d", f);
+		failures += check_qp(name, &m, qp[f]);
 	}
 	ar9311_merge_free(&m);
 	return failures;

@@ -1,6 +1,7 @@
 #ifndef AR9311_STRIPS_H
 #define AR9311_STRIPS_H
 
+#include <math.h>
 #include <stdint.h>
 
 /* video0.strips: the frame encoded as N horizontal strips, one wave5
@@ -111,6 +112,97 @@ static inline int ar9311_strips_plan(int count, uint32_t height,
 		}
 	}
 	return 0;
+}
+
+/* Bitrate.  Every strip has an encoder and a rate control of its own, so the
+ * way the bitrate is shared decides how the strips' qualities compare.
+ * Shared by lines, the strip with the busier picture (the ground below the
+ * sky) is quantised harder, and the seam shows as a step in sharpness: in a
+ * P1 flight (11-23, 2 strips, ~12 Mbit/s) the slice QP was 29 above the seam
+ * and 37 below, detail across the seam a third down.  So a strip's share is
+ * its coded lines times 2^(bias/6) -- 6 QP is about twice the bits -- and the
+ * biases follow the strips' QPs, closing a set fraction of the gap
+ * (video0.stripBalance).
+ *
+ * Closing it costs latency.  The last strip is sent after the camera has
+ * finished, the others while it is still writing, so a bit moved into the
+ * last strip delays the picture by its time on the radio.  P1 bench, 22
+ * Mbit/s, plain top and busy bottom, capture -> goggles: 22.4 ms at 0 %
+ * (QP 19.9/24.2), 23.6 ms at 50 % (20.4/23.6), 26.2 ms at 100 % (22.0/22.5,
+ * 22 % / 78 % of the bitrate). */
+#define AR9311_STRIPS_BIAS_MAX 6.0f       /* QP: half to twice by lines */
+#define AR9311_STRIPS_BIAS_DEADBAND 0.5f  /* QP a step would move */
+
+/** Share @p kbps out to the strips of @p plan by coded lines weighted by
+ *  @p bias, so that what is left once the overlap rows are dropped comes to
+ *  @p kbps; the shares add up exactly.  All biases 0: by lines alone. */
+static inline void ar9311_strips_split(const Ar9311StripPlan *plan,
+	const float *bias, uint32_t kbps, uint32_t *share)
+{
+	double w[AR9311_STRIPS_MAX], wsum = 0.0;
+	uint64_t coded = 0;
+	uint32_t total, left;
+	int k;
+
+	for (k = 0; k < plan->count; k++) {
+		coded += plan->enc_height[k];
+		w[k] = plan->enc_height[k] * exp2(bias[k] / 6.0);
+		wsum += w[k];
+	}
+	total = left = (uint32_t)((uint64_t)kbps * coded /
+		(plan->y0[plan->count - 1] + plan->height[plan->count - 1]));
+	for (k = 0; k < plan->count; k++) {
+		share[k] = k == plan->count - 1 ? left :
+			(uint32_t)((double)total * w[k] / wsum);
+		left -= share[k];
+	}
+}
+
+/** Move @p bias toward closing the fraction @p strength (0..1) of the gap
+ *  between the strips' qualities, from each strip's mean slice QP @p qp over
+ *  the last stretch.  A strip's QP above the mean (weighted by coded lines)
+ *  asks for that much more bias -- a QP of bias is about a QP of gap -- so
+ *  the bias it should have is strength x (bias + distance): at 1 the QPs
+ *  meet, at 0.5 the gap that is left equals the bias, so about half closes,
+ *  at 0 the biases go back to 0 (by lines).  Each step goes half the way,
+ *  then the biases are centred and held within +-AR9311_STRIPS_BIAS_MAX;
+ *  a step that would move no bias by AR9311_STRIPS_BIAS_DEADBAND is not
+ *  taken.  Returns 1 when a bias moved (the shares need setting again). */
+static inline int ar9311_strips_balance(const Ar9311StripPlan *plan,
+	const float *qp, float strength, float *bias)
+{
+	double lines = 0.0, mean = 0.0, centre = 0.0, far = 0.0;
+	float was[AR9311_STRIPS_MAX], move[AR9311_STRIPS_MAX];
+	int k, moved = 0;
+
+	for (k = 0; k < plan->count; k++) {
+		lines += plan->enc_height[k];
+		mean += plan->enc_height[k] * (double)qp[k];
+	}
+	mean /= lines;
+	for (k = 0; k < plan->count; k++) {
+		move[k] = strength * (bias[k] + (float)(qp[k] - mean)) - bias[k];
+		if (fabsf(move[k]) > far)
+			far = fabsf(move[k]);
+	}
+	if (far < AR9311_STRIPS_BIAS_DEADBAND)
+		return 0;
+	for (k = 0; k < plan->count; k++) {
+		was[k] = bias[k];
+		bias[k] += 0.5f * move[k];
+		centre += plan->enc_height[k] * (double)bias[k];
+	}
+	centre /= lines;
+	for (k = 0; k < plan->count; k++) {
+		bias[k] -= (float)centre;
+		if (bias[k] > AR9311_STRIPS_BIAS_MAX)
+			bias[k] = AR9311_STRIPS_BIAS_MAX;
+		if (bias[k] < -AR9311_STRIPS_BIAS_MAX)
+			bias[k] = -AR9311_STRIPS_BIAS_MAX;
+		if (fabsf(bias[k] - was[k]) > 0.01f)
+			moved = 1;
+	}
+	return moved;
 }
 
 #endif /* AR9311_STRIPS_H */

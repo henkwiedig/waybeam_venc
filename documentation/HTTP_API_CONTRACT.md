@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.42.0`
+- `contract_version`: `0.43.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -49,6 +49,7 @@
 | `video0.subFrameSync` | **false** | **false** | **false** (AR9311 only, **from 0.37.0**) |
 | `video0.strips` | **false** | **false** | **false** (AR9311 only, **from 0.38.0**) |
 | `video0.stripOverlap` | **false** | **false** | **false** (AR9311 only, **from 0.39.0**) |
+| `video0.stripBalance` | **false** | **false** | **false** (AR9311 only, **from 0.43.0**) |
 | `outgoing.server` / `outgoing.enabled` mutability | live | live | **live from 0.26.0** (restart_required before) |
 | `outgoing.server` that cannot be brought up | inert output, craft runs (**from 0.82.0**) | same | same |
 
@@ -115,8 +116,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.99.0",
-    "contract_version": "0.42.0",
+    "app_version": "0.100.0",
+    "contract_version": "0.43.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -339,7 +340,7 @@ including `fpv.roiQp`, `fpv.roiEnabled`, `fpv.roiSteps`, `fpv.roiCenter`,
 `video0.rcMode`, `video0.gopSize`, `video0.qpDelta`,
 `video0.sceneThreshold`, `video0.sceneHoldoff`,
 `video0.intraRefreshMode`, `video0.intraRefreshLines`, `video0.subFrameSync`,
-`video0.strips`, `video0.stripOverlap`,
+`video0.strips`, `video0.stripOverlap`, `video0.stripBalance`,
 `video0.intraRefreshQp`, `video0.zoomX`, `video0.zoomY`, `video0.framing`,
 `outgoing.maxPayloadSize`,
 `outgoing.audioPort`, `system.webPort`, and `system.overclockLevel`.
@@ -789,6 +790,13 @@ curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
 - **Measured** on a hand-tilted P1 (26-44 lines a frame), 1 row against none: pixels off by 8 levels or more ~28k -> 0.4-2.9k a frame, the median frame 46 -> 57 dB from what the encoders meant, the worst 29 -> 36-43 dB; what remains comes from moves of more than 64 lines a frame. A still scene gains nothing.
 - **Cost** at 1 row: the first part +1.4 ms, the whole picture +1.8 ms; ~12 % more lines encoded (the bitrate is split by encoded lines, so the sent rate stays on target).
 - A value the strip layout cannot take (a middle strip whose height is not a multiple of the overlap) logs a warning and encodes one picture; at 1080p every strip count takes 0..2.
+- `supported:false` on Star6E, Maruko and CV610.
+
+`video0.stripBalance` (`video0.strip_balance`; uint, `0`..`100`, default `0`; restart-required, persisted) is the share, in percent, of the quality gap between the strips that the bitrate closes. Every strip has an encoder and a rate control of its own; shared by the lines each encodes, the strip with the busier picture (the ground below the sky) is quantised harder and the seam shows as a step in sharpness (P1 flight, ~12 Mbit/s: slice QP 29 above the seam, 37 below). Every half second waybeam compares the strips' slice QPs and moves bitrate toward the coarser strip; `video0.bitrate` stays the total.
+
+- `0` (the default) shares by lines, as before 0.43.0. `100` brings the strips' QPs together; `50` aims at half the gap, assuming a strip's QP moves 6 per halving of its bits (a plain strip that does not spend its share moves less, so less of the gap closes).
+- **Cost: latency.** The last strip is sent after the camera has finished, the others while it is still writing, so bits moved into the last strip delay the picture by their time on the radio. Measured on a P1 bench at 22 Mbit/s, plain top and busy bottom, capture -> goggles: `0` 22.4 ms (QP 19.9/24.2), `50` 23.6 ms (20.4/23.6), `100` 26.2 ms (22.0/22.5).
+- The 10 s strips line of the log reports each strip's mean QP and current share.
 - `supported:false` on Star6E, Maruko and CV610.
 
 ### `GET /api/v1/restart`
@@ -2070,6 +2078,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.43.0` (additive — strip balance on AR9311): adds `video0.stripBalance` (`video0.strip_balance`), uint `0`..`100`, default `0` (by lines, as before), restart-required, persisted: the share of the quality gap between the strips that the bitrate closes, by moving bitrate toward the strip with the higher slice QP (`0` = shared by lines, the behaviour before). `video0.bitrate` stays the total. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".
 - `0.42.0` (additive — tone pages follow the exposure on AR9311): `GET /api/v1/ae` on AR9311 adds `toneScalar`, the position of the AE's exposure on the sensor tuning file's exposure table that the ISP's gamma curve and DRC profile are selected and blended on (the vendor's AEC trigger scalar; `-1` while the pages are pinned, e.g. with no exposure table in the sensor's tuning file).  `GET /api/v1/awb` on AR9311 adds `ccmCt`, the colour temperature (kelvin) the AWB last gave the ISP driver's colour stages (colour matrix bank blend and cm saturation column; `0` when none was given, e.g. a driver without `colour_temp`).  The SC231AI's white balance is re-anchored on stock: a three-point illuminant locus (warm 269/834 at 2800 K, mid 400/644 at 4000 K, daylight 537/474 at 6500 K), which moves what `isp.awbMode=ct_manual` gives for an `isp.awbCt` (6500 K is now 537/474, 4000 K 400/644); no other field changes.
 - `0.41.0` (additive — resilience presets per backend): `video0.resilience` in `GET /api/v1/capabilities` carries a `ui` block (`group` "Video", `control` "select") whose `options` are the named presets this backend runs, in table order: all ten on Star6E, Maruko and CV610; `off`, `rescue`, `quality`, `racing`, `endurance` on AR9311, which has no SVC-T and, with intra refresh on, no periodic IDR, so `sprint` and `patrol` would run as `racing` and `endurance` (both stay accepted, so a saved one still starts, but are not listed).  The `ltr` / `ltr:<N>` forms stay accepted where the backend has SVC-T but are not listed.  `GET /api/v1/set` now judges a change against the backend as the next start loads it (preset expanded), so on AR9311 `video0.resilience=rally|range|fpv|ltr…` is refused with `409 validation_failed` and nothing is saved.  Before, the check saw the previous preset's expansion beside the new name, answered `200`, saved the preset, and the respawn refused its own `/etc/waybeam.json` on every start.
 - `0.40.0` (additive — white balance on AR9311): `isp.awbMode` (`auto` / `ct_manual`), `isp.awbCt` (kelvin) and `isp.awbFps` (`0` stops the loop) become supported and live on AR9311, driving waybeam's own AWB for the SC231AI camera (raw zone statistics, neutral zones on the sensor's illuminant line).  `GET /api/v1/awb` on AR9311 returns `{"engine":"ar9311","sensor","mode","gains":{"red","green","blue"},"estimate":{"live","zones","rg","bg","ct"},"decisions","moves"}`, or `{"engine":"ar9311","mode":"off"}` when the loop is not running (`isp.awbFps` 0, or a sensor without a colour calibration such as the NT99235).  See the AR9311 backend notes (`docs/AR9311_BACKEND.md`, "White balance").

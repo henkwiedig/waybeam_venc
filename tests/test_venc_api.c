@@ -518,6 +518,15 @@ static int test_field_support_by_backend(void)
 	CHECK("strip_overlap unsupported cv610",
 		venc_api_field_supported_for_backend("cv610",
 			"video0.strip_overlap") == 0);
+	CHECK("strip_balance supported ar9311 (camelCase alias)",
+		venc_api_field_supported_for_backend("ar9311",
+			"video0.stripBalance") == 1);
+	CHECK("strip_balance unsupported star6e",
+		venc_api_field_supported_for_backend("star6e",
+			"video0.strip_balance") == 0);
+	CHECK("strip_balance unsupported cv610",
+		venc_api_field_supported_for_backend("cv610",
+			"video0.strip_balance") == 0);
 
 	CHECK("scene_threshold supported star6e",
 		venc_api_field_supported_for_backend("star6e",
