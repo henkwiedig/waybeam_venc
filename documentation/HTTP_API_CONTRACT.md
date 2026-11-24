@@ -18,7 +18,7 @@
   - `read_only` — cannot be changed via API.
 
 ## Contract Version
-- `contract_version`: `0.43.0`
+- `contract_version`: `0.44.0`
 - `status`: `active`
 
 ## Per-Backend Field Support
@@ -32,7 +32,7 @@
 | `video0.qpDelta` | true | true | **false** |
 | `video0.minQp` / `maxQp` | true | true | true |
 | `video0.intraRefreshQp` | **false** | **false** | true |
-| `video0.fpsDivisor` | **false** (live `video0.fps` decimates) | **false** (same) | true (**from 0.85.0**) |
+| `video0.fpsDivisor` | **false** (live `video0.fps` decimates) | **false** (same) | true (**from 0.85.0**; AR9311 too, **from 0.101.0**) |
 | `video0.maxFramePct` | **false** | **false** | true (**from 0.86.0**) |
 | `video0.sliceOutput` | **false** | **false** | true (**from 0.87.0**) |
 | `outgoing.sidecarPort` | true | true | true (**from 0.74.0**) |
@@ -42,7 +42,7 @@
 | `isp.gainMax` / `isp.shutterMaxUs` | true | true | true (**from 0.78.0**) |
 | `isp.sensorBin` | true | true | true (**from 0.81.0**, PQTools `.bin` via libbin.so) |
 | `fpv.roiQp` accepted range | ±20 | ±20 | ±20 (**±30 before 0.79.0**) |
-| `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before), **/ `video0.fpsDivisor` from 0.85.0** |
+| `video0.bitrate` floor (kbps) | 1000 | 1000 | **300 from 0.84.3** (1000 before), **/ `video0.fpsDivisor` from 0.85.0** (AR9311: **500 from 0.101.0**, 1000 before, / `video0.fpsDivisor`) |
 | a negative `fpv.roiQp` can overrun the bitrate target | no (**from 0.84.2**) | no (**from 0.84.2**) | no (**from 0.84.2**; 25x measured before) |
 | `isp.gainMin` / `isp.shutterMinUs` / `isp.awbMode` / `isp.awbCt` | true | true | **false** (AR9311: `isp.awbMode` / `isp.awbCt` / `isp.awbFps` true and live, **from 0.40.0**) |
 | `isp.antiFlickerHz` | **false** | **false** | **false** (AR9311 only, **from 0.35.0**) |
@@ -116,8 +116,8 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.100.0",
-    "contract_version": "0.43.0",
+    "app_version": "0.101.0",
+    "contract_version": "0.44.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
   }
@@ -722,7 +722,7 @@ process restart. The SigmaStar kernel driver does not reliably reinitialize the 
 when switching modes in-process. Use `/api/v1/restart` (reloads `/etc/venc.json`) or
 restart the venc process to change sensor modes.
 
-### `video0.fpsDivisor` (CV610) — Live Frame Decimation
+### `video0.fpsDivisor` (CV610, AR9311) — Live Frame Decimation
 
 On CV610 `video0.fps` selects the sensor mode and is restart-only. `video0.fpsDivisor` (canonical `video0.fps_divisor`, uint `1..4`, live) has the encoder take every Nth frame the sensor delivers instead: the rate controller's frame-rate control (`h265_cbr.src_frame_rate` / `dst_frame_rate`) drops the others. Sensor, ISP and VPSS keep their rate, so a kept frame is no older at encode than before.
 
@@ -741,6 +741,11 @@ A divisor sent alone keeps the bitrate, and CBR then spreads it over fewer, larg
 - The RTP timestamp advances by every sensor frame, decimated or not.
 - Measured on the OS02K10 at 1080p100 (static scene), capture -> encode unchanged at ~12 ms throughout. Colortrans bin: 50 fps at ~237 kbps (P-frame QP ~40) and 25 fps at ~120 kbps (QP 38-42), on target. Day bin, which bottoms out at ~500 kbps / QP 51 at 100 fps: ~235-270 kbps at 50 fps (QP 49) and 119-156 at 25 fps (QP 48-50). Switching either way costs a +-10% rate wobble for about half a second.
 - `supported:false` on Star6E and Maruko, where `video0.fps` itself is live and decimates.
+- **AR9311 (from 0.101.0):** the same field and the same pairing, floor 500 at 60 fps (500 -> 250 -> 125 kbps at 60 -> 30 -> 15 fps). `video0.fps` is 60 only there. The feeds hand one camera frame in N to the wave5 encoders, which get N x `video0.bitrate`, so a frame keeps its size; no IDR, a GDR wave takes N times longer, the RTP timestamp advances by every camera frame, `/api/v1/fps/live` reports 60 / N. Measured on a P1 (static scene): 483 / 241 / 122 kbps delivered for 500 / 250 / 125 at the same strip QP, latency unchanged.
+
+```bash
+curl "http://<device-ip>/api/v1/live/set?video0.fpsDivisor=2&video0.bitrate=250"   # AR9311: 30 fps
+```
 
 ### `video0.maxFramePct` (CV610) — P-Frame Size Cap
 
@@ -2078,6 +2083,7 @@ in Notes. As of `contract_version: 0.29.0`:
 | `isp.aeEngine` ("sdk" only) | applied | applied | Unified AE selector landed in 0.10.13.  `custom` (userspace AE governor) is RETIRED — Maruko in 0.22.0, Star6E in 0.47.0 — and the value was **removed** in 0.47.0.  `sdk` is the only accepted value; any other (e.g. a stale `custom`) warns and falls back to `sdk`.  Both backends run the SDK firmware/bin AE for convergence plus a supervisory thread that enforces the `isp.gain*`/`isp.shutter*` limits.  CV610 has no such thread and reports `isp.aeEngine` unsupported: its ISP owns AE outright, and the two ceilings it does honour are written straight into `ot_isp_exposure_attr.auto_attr` instead. |
 
 ## Change Log (Contract)
+- `0.44.0` (additive — frame decimation and a lower bitrate floor on AR9311): `video0.fpsDivisor` (`video0.fps_divisor`) becomes supported and live on AR9311, with CV610's semantics (uint `1..4`, runtime-only, boots `1`, the `video0.bitrate` floor divided by it, a sub-floor rate saved as the floor); `/api/v1/fps/live` reports the decimated rate. The AR9311 `video0.bitrate` floor drops from 1000 to **500** kbps. See "`video0.fpsDivisor` (CV610, AR9311)".
 - `0.43.0` (additive — strip balance on AR9311): adds `video0.stripBalance` (`video0.strip_balance`), uint `0`..`100`, default `0` (by lines, as before), restart-required, persisted: the share of the quality gap between the strips that the bitrate closes, by moving bitrate toward the strip with the higher slice QP (`0` = shared by lines, the behaviour before). `video0.bitrate` stays the total. `supported:false` on Star6E, Maruko and CV610. See "`video0.strips` (AR9311) — Strips".
 - `0.42.0` (additive — tone pages follow the exposure on AR9311): `GET /api/v1/ae` on AR9311 adds `toneScalar`, the position of the AE's exposure on the sensor tuning file's exposure table that the ISP's gamma curve and DRC profile are selected and blended on (the vendor's AEC trigger scalar; `-1` while the pages are pinned, e.g. with no exposure table in the sensor's tuning file).  `GET /api/v1/awb` on AR9311 adds `ccmCt`, the colour temperature (kelvin) the AWB last gave the ISP driver's colour stages (colour matrix bank blend and cm saturation column; `0` when none was given, e.g. a driver without `colour_temp`).  The SC231AI's white balance is re-anchored on stock: a three-point illuminant locus (warm 269/834 at 2800 K, mid 400/644 at 4000 K, daylight 537/474 at 6500 K), which moves what `isp.awbMode=ct_manual` gives for an `isp.awbCt` (6500 K is now 537/474, 4000 K 400/644); no other field changes.
 - `0.41.0` (additive — resilience presets per backend): `video0.resilience` in `GET /api/v1/capabilities` carries a `ui` block (`group` "Video", `control` "select") whose `options` are the named presets this backend runs, in table order: all ten on Star6E, Maruko and CV610; `off`, `rescue`, `quality`, `racing`, `endurance` on AR9311, which has no SVC-T and, with intra refresh on, no periodic IDR, so `sprint` and `patrol` would run as `racing` and `endurance` (both stay accepted, so a saved one still starts, but are not listed).  The `ltr` / `ltr:<N>` forms stay accepted where the backend has SVC-T but are not listed.  `GET /api/v1/set` now judges a change against the backend as the next start loads it (preset expanded), so on AR9311 `video0.resilience=rally|range|fpv|ltr…` is refused with `409 validation_failed` and nothing is saved.  Before, the check saw the previous preset's expansion beside the new name, answered `200`, saved the preset, and the respawn refused its own `/etc/waybeam.json` on every start.

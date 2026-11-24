@@ -89,6 +89,22 @@ static int test_validation(void)
 	cfg.video0.max_qp = 30;
 	failures += expect_config("ar9311_reject_inverted_qp", &cfg, 0);
 
+	/* The bitrate floor, 500, is per frame: one camera frame in N holds a
+	 * target N times lower (video0.fps_divisor). */
+	valid_config(&cfg);
+	cfg.video0.bitrate = 500;
+	failures += expect_config("ar9311_accept_floor_500", &cfg, 1);
+	cfg.video0.bitrate = 499;
+	failures += expect_config("ar9311_reject_below_floor", &cfg, 0);
+	cfg.video0.fps_divisor = 2;
+	cfg.video0.bitrate = 250;
+	failures += expect_config("ar9311_accept_250_at_divisor_2", &cfg, 1);
+	cfg.video0.bitrate = 249;
+	failures += expect_config("ar9311_reject_249_at_divisor_2", &cfg, 0);
+	cfg.video0.fps_divisor = 4;
+	cfg.video0.bitrate = 125;
+	failures += expect_config("ar9311_accept_125_at_divisor_4", &cfg, 1);
+
 	valid_config(&cfg);
 	failures += expect_config("ar9311_accept_racing",
 		&cfg, venc_config_apply_resilience_preset("racing",
@@ -171,6 +187,8 @@ static int test_mutability(void)
 
 	failures += expect("ar9311_bitrate_live",
 		!ar9311_field_is_restart_only("video0.bitrate"), NULL);
+	failures += expect("ar9311_fps_divisor_live",
+		!ar9311_field_is_restart_only("video0.fps_divisor"), NULL);
 	failures += expect("ar9311_server_live",
 		!ar9311_field_is_restart_only("outgoing.server"), NULL);
 	failures += expect("ar9311_gop_restart",

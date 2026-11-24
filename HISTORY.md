@@ -1,5 +1,49 @@
 # History
 
+## [0.101.0] - 2026-11-24
+
+AR9311: **the bitrate floor drops from 1000 to 500, and frame decimation
+takes it below that** (`video0.fpsDivisor`, as on CV610).
+`contract_version` moves to **0.44.0** (additive).
+
+- **Why.**  A SinYine F1 flight at 5 MHz (11-23): at its lowest MCS the
+  link carried ~1 Mbit/s, the link controller wanted ~530 kbps, waybeam
+  held 1000, and the excess queued on the air -- frames reached the
+  goggles 160-600 ms late.  The 1000 floor came with the SigmaStar parts,
+  where the stream breaks up below 1 Mbit/s; it was never measured here.
+- **The floor, measured.**  P1, 1080p60, two strips, static scene, each
+  target pinned for 20 s (`ar8030-transport-tx -n T -x T`): 1000 -> 922
+  kbps delivered at strip QP 35/40, 700 -> 655 at 38/44, 500 -> 482 at
+  41/47, 350 -> 390 (+11 %) at 43.5/50.5, 250 -> 348 (+39 %) at 46-47/51,
+  150 -> 321 at 51/51 (the bottom).  60 fps at the goggles at every step,
+  even frame sizes (p99 ~1.7x the median), no oscillation, capture ->
+  decode ~16 ms.  `VENC_BITRATE_MIN_KBPS` is now 500 on AR9311, with room
+  above ~350 for motion, which raises the rate where QP 51 is reached.
+- **Decimation.**  `video0.fpsDivisor` (`1..4`, live, runtime-only, boots
+  `1`) becomes supported on AR9311: the feeds hand one camera frame in N to
+  the encoders (the others go straight back to the camera, not counted as
+  camera skips), and the encoders get N x `video0.bitrate` -- they budget
+  every frame as one of 60 a second -- so a frame keeps the size it has at
+  the full rate and the floor is divided by N: 500 -> 250 -> 125 kbps at
+  60 -> 30 -> 15 fps.  No IDR on a change (a GDR wave takes N times
+  longer), the RTP timestamp advances by every camera frame, and
+  `/api/v1/fps/live` reports 60 / N.  A rate valid only while decimated is
+  saved as the floor, as on CV610.
+- **Bench, by API:** 500 at 60 fps, 250 at 30, 125 at 15 delivered 483 /
+  241 / 122 kbps at the same strip QP (40.8/47.5, 41.0/47.6, 41.1/47.5),
+  the same frame size at the goggles (932 / 958 / 922 bytes) and the same
+  latency (~16.5 ms); the goggles' vsync lock locked at a frame every 2 and
+  4 refreshes.  **With the link controller** (`-C pi -n 500 -D 4`) at 5
+  MHz and the lowest MCS (471 kbps capacity): 1/2 at 966 kbps capacity,
+  1/4 in the queue the switch left, then 15 fps at ~260 kbps, ~60 ms
+  capture -> decode; back to 1/2 and 1/1 once the link was restored.
+  (At 2.5 MHz nothing reached the goggles at any rate -- a link-layer
+  limit, not the encoder's.)
+- **Tests:** AR9311 validation (now built with `PLATFORM_AR9311`, so it
+  sees the backend's floor): 500 accepted, 499 refused, 250 at divisor 2
+  and 125 at 4 accepted, 249 at 2 refused; the divisor is live there; the
+  API advertises it on AR9311.
+
 ## [0.100.0] - 2026-11-23
 
 AR9311 strips: **the bitrate follows the strips' quality** (new

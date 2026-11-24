@@ -87,6 +87,13 @@ typedef struct {
 	uint32_t frame_ticks;
 	uint16_t max_payload_size;
 	uint32_t live_bitrate;
+	/* video0.fps_divisor, live (set under g_ar9311_rate_mutex): the feeds
+	 * give the encoder(s) one camera frame in N, and the encoders get N x
+	 * live_bitrate, so a frame keeps the size it has at the full rate --
+	 * the bitrate floor is per frame.  0 reads as 1.  feed_phase counts the
+	 * camera frames on the feeding thread. */
+	uint32_t fps_divisor;
+	uint32_t feed_phase;
 	int verbose;
 
 	uint64_t frames;
@@ -180,6 +187,27 @@ static void ar9311_signal_handler(int signo)
 
 /* @p kbps shared out to the strip encoders by the current biases; under
  * g_ar9311_rate_mutex. */
+static uint32_t ar9311_fps_divisor(const Ar9311RunnerContext *ctx)
+{
+	const uint32_t divisor = __atomic_load_n(&ctx->fps_divisor,
+		__ATOMIC_ACQUIRE);
+
+	return divisor ? divisor : 1u;
+}
+
+/* Under video0.fps_divisor, whether this camera frame is left out (one in N
+ * goes to the encoders). */
+static int ar9311_frame_decimated(Ar9311RunnerContext *ctx)
+{
+	const uint32_t divisor = ar9311_fps_divisor(ctx);
+
+	if (divisor <= 1u) {
+		ctx->feed_phase = 0;
+		return 0;
+	}
+	return ctx->feed_phase++ % divisor != 0;
+}
+
 static int ar9311_strips_set_rates(Ar9311RunnerContext *ctx, uint32_t kbps)
 {
 	uint32_t share[AR9311_STRIPS_MAX];
@@ -194,6 +222,18 @@ static int ar9311_strips_set_rates(Ar9311RunnerContext *ctx, uint32_t kbps)
 	return 0;
 }
 
+/* The encoders' rate for a stream of kbps at the current divisor: they take
+ * every frame they get as one of 60 a second, so N x the rate keeps a frame
+ * the size it has at the full rate.  With g_ar9311_rate_mutex held. */
+static int ar9311_set_rates(Ar9311RunnerContext *ctx, uint32_t kbps)
+{
+	const uint32_t rate = kbps * ar9311_fps_divisor(ctx);
+
+	if (ctx->strips)
+		return ar9311_strips_set_rates(ctx, rate);
+	return ar9311_encoder_set_bitrate(&ctx->encoder, rate);
+}
+
 static int ar9311_apply_bitrate(uint32_t kbps)
 {
 	Ar9311RunnerContext *ctx = g_ar9311_runner;
@@ -202,12 +242,36 @@ static int ar9311_apply_bitrate(uint32_t kbps)
 	if (!ctx)
 		return -1;
 	pthread_mutex_lock(&g_ar9311_rate_mutex);
-	if (ctx->strips)
-		rc = ar9311_strips_set_rates(ctx, kbps);
-	else
-		rc = ar9311_encoder_set_bitrate(&ctx->encoder, kbps);
+	rc = ar9311_set_rates(ctx, kbps);
 	if (rc == 0)
 		__atomic_store_n(&ctx->live_bitrate, kbps, __ATOMIC_RELEASE);
+	pthread_mutex_unlock(&g_ar9311_rate_mutex);
+	return rc != 0 ? -1 : 0;
+}
+
+/* video0.fps_divisor, live: one camera frame in N from the next one on, the
+ * encoders' rate moved with it.  No IDR: the stream goes on, and a GDR wave
+ * takes N times longer. */
+static int ar9311_apply_fps_divisor(uint32_t divisor)
+{
+	Ar9311RunnerContext *ctx = g_ar9311_runner;
+	uint32_t old;
+	int rc = 0;
+
+	if (!ctx || divisor < 1u || divisor > VENC_FPS_DIVISOR_MAX)
+		return -1;
+	pthread_mutex_lock(&g_ar9311_rate_mutex);
+	old = ar9311_fps_divisor(ctx);
+	if (divisor != old) {
+		__atomic_store_n(&ctx->fps_divisor, divisor, __ATOMIC_RELEASE);
+		rc = ar9311_set_rates(ctx, __atomic_load_n(&ctx->live_bitrate,
+			__ATOMIC_ACQUIRE));
+		if (rc != 0)
+			__atomic_store_n(&ctx->fps_divisor, old, __ATOMIC_RELEASE);
+		else
+			printf("> [ar9311] encoding 1 camera frame in %u: %u fps\n",
+				divisor, AR9311_FPS / divisor);
+	}
 	pthread_mutex_unlock(&g_ar9311_rate_mutex);
 	return rc != 0 ? -1 : 0;
 }
@@ -247,7 +311,8 @@ static int ar9311_request_idr(void)
 
 static uint32_t ar9311_query_live_fps(void)
 {
-	return g_ar9311_runner ? AR9311_FPS : 0;
+	return g_ar9311_runner ?
+		AR9311_FPS / ar9311_fps_divisor(g_ar9311_runner) : 0;
 }
 
 static int ar9311_transport_fill(Ar9311RunnerContext *ctx,
@@ -544,6 +609,7 @@ static char *ar9311_query_awb_info(void)
 
 static const VencApplyCallbacks g_ar9311_apply_callbacks = {
 	.apply_bitrate = ar9311_apply_bitrate,
+	.apply_fps_divisor = ar9311_apply_fps_divisor,
 	.apply_verbose = ar9311_apply_verbose,
 	.request_idr = ar9311_request_idr,
 	.query_live_fps = ar9311_query_live_fps,
@@ -640,7 +706,8 @@ static void ar9311_send_rtp_frame(Ar9311RunnerContext *ctx,
 			break;
 		}
 	}
-	ctx->rtp.timestamp += ctx->frame_ticks;
+	/* every camera frame, decimated or not */
+	ctx->rtp.timestamp += ctx->frame_ticks * ar9311_fps_divisor(ctx);
 }
 
 /* One pass over the access unit: cache its parameter sets (wave5 emits them
@@ -881,6 +948,7 @@ static int ar9311_prepare(void *opaque)
 	}
 	venc_api_set_sensor_info(0, 0, ctx->config.sensor.index);
 	ctx->live_bitrate = ctx->config.video0.bitrate;
+	ctx->fps_divisor = 1;   /* runtime-only: every start takes every frame */
 	ctx->max_payload_size = ctx->config.outgoing.max_payload_size;
 	ctx->verbose = ctx->config.system.verbose ? 1 : 0;
 	printf("> AR9311 backend selected (V4L2 camera + wave5, first slice)\n");
@@ -1336,6 +1404,11 @@ static int ar9311_strips_feed(Ar9311RunnerContext *ctx)
 				return -1;
 			continue;
 		}
+		if (ar9311_frame_decimated(ctx)) {
+			if (ar9311_capture_requeue(&ctx->capture, index) != 0)
+				return -1;
+			continue;
+		}
 		memset(&ctx->strip_frame[index], 0, sizeof(ctx->strip_frame[0]));
 		ctx->strip_frame[index].used = 1;
 		ctx->strip_frame[index].index = index;
@@ -1404,7 +1477,7 @@ static void ar9311_strips_rebalance(Ar9311RunnerContext *ctx, uint64_t now)
 		if (ar9311_strips_balance(&ctx->plan, qp,
 			(float)ctx->config.video0.strip_balance / 100.0f,
 			ctx->strip_bias) &&
-		    ar9311_strips_set_rates(ctx, __atomic_load_n(
+		    ar9311_set_rates(ctx, __atomic_load_n(
 			&ctx->live_bitrate, __ATOMIC_ACQUIRE)) != 0 &&
 		    (ctx->strip_rate_errors++ < 10 ||
 		     ctx->strip_rate_errors % 600 == 0))
@@ -1650,6 +1723,11 @@ static int ar9311_feed_encoder(Ar9311RunnerContext *ctx)
 		&corrupt, &capture_us)) == 0) {
 		if (corrupt || ctx->held >= ctx->capture.max_held) {
 			__atomic_add_fetch(&ctx->camera_skips, 1, __ATOMIC_RELAXED);
+			if (ar9311_capture_requeue(&ctx->capture, index) != 0)
+				return -1;
+			continue;
+		}
+		if (ar9311_frame_decimated(ctx)) {
 			if (ar9311_capture_requeue(&ctx->capture, index) != 0)
 				return -1;
 			continue;

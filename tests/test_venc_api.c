@@ -1540,7 +1540,7 @@ static int test_live_set_endpoint_volatile_no_disk_write(void)
 	return failures;
 }
 
-/* video0.fps_divisor: live on CV610 only, range-checked, and never written
+/* video0.fps_divisor: live on CV610 and AR9311, range-checked, and never written
  * to disk -- not even by a persisting /set -- so a link controller's
  * decimation cannot outlive a restart. */
 static int test_cv610_fps_divisor_live_volatile(void)
@@ -1560,6 +1560,12 @@ static int test_cv610_fps_divisor_live_volatile(void)
 			"video0.fps_divisor") == 1);
 	CHECK("fps divisor alias supported cv610",
 		venc_api_field_supported_for_backend("cv610",
+			"video0.fpsDivisor") == 1);
+	CHECK("fps divisor supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
+			"video0.fps_divisor") == 1);
+	CHECK("fps divisor alias supported ar9311",
+		venc_api_field_supported_for_backend("ar9311",
 			"video0.fpsDivisor") == 1);
 	CHECK("fps divisor unsupported star6e",
 		venc_api_field_supported_for_backend("star6e",

@@ -488,12 +488,37 @@ Exactly one mode, which is all the open camera chain delivers today:
 
 | Field | Class |
 |---|---|
-| `video0.bitrate` | live (wave5 re-targets the rate controller) |
+| `video0.bitrate` | live (wave5 re-targets the rate controller); floor 500 kbps, divided by `video0.fpsDivisor` |
+| `video0.fpsDivisor` | live, runtime-only (boots 1): one camera frame in N (1..4) goes to the encoders, which get N x the bitrate, so a frame keeps its size; see "Bitrate floor and frame decimation" |
 | `outgoing.enabled`, `outgoing.server`, `outgoing.maxPayloadSize`, `system.verbose` | live |
 | `isp.gainMax`, `isp.gainMin`, `isp.shutterMaxUs`, `isp.shutterMinUs` (AE limits), `isp.antiFlickerHz` | live |
 | `isp.awbMode`, `isp.awbCt`, `isp.awbFps` (white balance) | live |
 | `isp.aeFps` (AE decision rate) | restart |
 | `image.mirror`, `image.flip` (both = 180 degrees; at the sensor, encoder-side on a kernel without the orientation parameter), `video0.resilience` (intra-refresh presets, see above), `video0.subFrameSync`, `video0.strips`, `video0.stripOverlap`, `video0.stripBalance` (see above), `video0.gopSize` (IDR period, max 2047 frames; only with resilience `off`), `video0.minQp`/`maxQp`, `outgoing.connectedUdp`, `system.webPort` | restart |
+
+### Bitrate floor and frame decimation
+
+The floor is 500 kbps at 60 fps (`VENC_BITRATE_MIN_KBPS`, 1000 before
+0.101.0, inherited from the SigmaStar parts, where the stream breaks up
+below 1 Mbit/s).  On a P1 at 1080p60 with two strips (bench 2026-11-24,
+static scene) the wave5 rate control held 500 within 4 % at strip QP
+41/47, overshot 350 by 11 % and 250 by 39 % with the bottom strip at QP
+51, and bottomed out at ~330 kbps with both strips at QP 51 -- at 60 fps
+throughout, even frame sizes, no oscillation.  Motion raises the rate
+where QP 51 is reached, hence the margin.
+
+`video0.fpsDivisor` takes the rate below that: the feeds hand one camera
+frame in N to the encoders (the others go straight back to the camera,
+not counted as camera skips), and the encoders get N x `video0.bitrate`:
+they budget every frame as one of 60 a second, so a frame keeps the size
+it has at the full rate and the floor is divided by N.  No IDR on a
+change; a GDR wave takes N times longer.  The RTP timestamp advances by
+every camera frame.  `/api/v1/fps/live` reports 60 / N.  Bench: 500 kbps
+at 60 fps, 250 at 30 and 125 at 15 delivered 483 / 241 / 122 kbps at the
+same strip QP (40.8/47.5, 41.0/47.6, 41.1/47.5), the same frame size at
+the goggles and the same capture -> decode latency (~16.5 ms).
+ar8030-transport's tx `-D 4` steps through it when the link cannot carry
+the floor.
 
 `GET /request/idr` works (forced keyframe on the next frame, rate limited).
 Picture controls are on `/api/v1/iq` (above), not config fields.

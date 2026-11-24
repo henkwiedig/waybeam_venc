@@ -20,7 +20,11 @@ static const char *validate_video(const VencConfig *cfg)
 		return "AR9311 phase one encodes video0.size=1920x1080 only";
 	if (v->fps != AR9311_FPS)
 		return "AR9311 phase one runs the camera at video0.fps=60 only";
-	if (v->bitrate < VENC_BITRATE_MIN_KBPS ||
+	/* The floor is per frame: encoding one camera frame in N, the encoders
+	 * hold a target N times lower at the same frame size
+	 * (video0.fps_divisor). */
+	if (v->bitrate < VENC_BITRATE_MIN_KBPS /
+			(v->fps_divisor ? v->fps_divisor : 1u) ||
 	    v->bitrate > VENC_BITRATE_MAX_KBPS)
 		return "video0.bitrate is outside the supported range";
 	if (!isfinite(v->gop_size) || v->gop_size < 0.0 ||
@@ -105,7 +109,7 @@ int ar9311_field_is_restart_only(const char *field_key)
 {
 	static const char *const live[] = {
 		"system.verbose",
-		"video0.bitrate",
+		"video0.bitrate", "video0.fps_divisor",
 		"isp.gain_max", "isp.gain_min",
 		"isp.shutter_max_us", "isp.shutter_min_us",
 		"isp.anti_flicker_hz",

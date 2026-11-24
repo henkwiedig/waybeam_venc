@@ -569,10 +569,11 @@ $(CV610_VALIDATION_TEST): tests/test_cv610_validation.c src/cv610_validation.c \
 		src/venc_config.c src/codec_config.c lib/cJSON.c
 	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -lm -o $@
 
+# PLATFORM_AR9311: the backend's own bitrate floor (venc_config.h).
 $(AR9311_VALIDATION_TEST): tests/test_ar9311_validation.c \
 		src/ar9311_validation.c src/pipeline_common.c \
 		src/intra_refresh.c src/venc_config.c src/codec_config.c lib/cJSON.c
-	$(HOST_CC) $(HOST_CFLAGS) -Werror $^ -ldl -lm -o $@
+	$(HOST_CC) $(HOST_CFLAGS) -DPLATFORM_AR9311 -Werror $^ -ldl -lm -o $@
 
 $(AR9311_MERGE_TEST): tests/test_ar9311_merge.c src/ar9311_merge.c \
 		include/ar9311_merge.h include/ar9311_strips.h \

@@ -40,16 +40,26 @@ extern "C" {
  * default bins it bottoms out higher, at QP 51 and ~500 kbps on the same
  * scene: asked for 400 or 300 it delivered ~500, with no larger frames, no
  * added latency and no encoder backlog, so a target below that is harmless
- * there, just not met. */
+ * there, just not met.
+ *
+ * AR9311 (wave5, 1080p60 CBR, two strips) is floored at 500: on a P1 it
+ * held 500 within 4 % at strip QP 41/47, overshot 350 by 11 % and 250 by
+ * 39 % with the bottom strip at QP 51, and bottomed out at ~330 kbps with
+ * both strips at QP 51 -- 60 fps throughout, even frame sizes, no RC
+ * oscillation (bench 2026-11-24, static scene; motion raises the rate
+ * where QP 51 is reached, hence the margin above ~350). */
 #ifdef PLATFORM_CV610
 #define VENC_BITRATE_MIN_KBPS 300
+#elif defined(PLATFORM_AR9311)
+#define VENC_BITRATE_MIN_KBPS 500
 #else
 #define VENC_BITRATE_MIN_KBPS 1000
 #endif
 #define VENC_BITRATE_MAX_KBPS 200000
 
-/* video0.fps_divisor ceiling: a quarter of 1080p100 is 25 fps.  CV610
- * divides VENC_BITRATE_MIN_KBPS by the divisor: the floor is per frame. */
+/* video0.fps_divisor ceiling: a quarter of 1080p100 is 25 fps.  CV610 and
+ * AR9311 divide VENC_BITRATE_MIN_KBPS by the divisor: the floor is per
+ * frame. */
 #define VENC_FPS_DIVISOR_MAX 4
 
 /* video0.max_frame_pct range (0 = off): the largest P-frame in percent of
@@ -274,8 +284,8 @@ typedef struct {
 	 * and is never written to /etc/waybeam.json.  Inert unless
 	 * framing=="stab-fill" (Star6E only). */
 	bool pause_stab;
-	/* Runtime frame decimation (MUT_LIVE, CV610 only): the encoder takes
-	 * every Nth frame the sensor delivers, 1 = all of them, and the
+	/* Runtime frame decimation (MUT_LIVE, CV610 and AR9311): the encoder
+	 * takes every Nth frame the sensor delivers, 1 = all of them, and the
 	 * video0.bitrate floor drops to VENC_BITRATE_MIN_KBPS / N.  For a link
 	 * controller that has hit the floor (ar8030-transport tx -D).  Not
 	 * persisted, like pause_stab: always boots 1.  Star6E and Maruko

@@ -994,6 +994,8 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 			"system.web_port", "system.verbose",
 			"sensor.index", "sensor.mode",
 			"video0.fps", "video0.size", "video0.bitrate",
+			/* one camera frame in N, ar9311_apply_fps_divisor() */
+			"video0.fps_divisor",
 			"video0.gop_size", "video0.min_qp", "video0.max_qp",
 			"video0.resilience", "video0.sub_frame_sync",
 			"video0.strips", "video0.strip_overlap",
@@ -1225,8 +1227,9 @@ int venc_api_field_supported_for_backend(const char *backend_name,
 	    strcmp(canonical_key, "video0.intra_refresh_qp") == 0)
 		return 0;
 
-	/* video0.fps_divisor is CV610's live decimation.  Star6E and Maruko
-	 * decimate through video0.fps itself, which is live there. */
+	/* video0.fps_divisor is CV610's (and AR9311's, returned above) live
+	 * decimation.  Star6E and Maruko decimate through video0.fps itself,
+	 * which is live there. */
 	if (backend_name && strcmp(backend_name, "cv610") != 0 &&
 	    strcmp(canonical_key, "video0.fps_divisor") == 0)
 		return 0;
