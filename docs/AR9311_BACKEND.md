@@ -167,7 +167,7 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
   first strip is queued, so all strips turn IDR together.  Needs sub-frame
   sync and a frame-shm output; without either waybeam warns and encodes
   one picture.
-- **Bitrate** (`video0.stripBalance`, restart, 0..100, default 0): every
+- **Bitrate** (`video0.stripBalance`, restart, 0..100, default 100): every
   strip has its own rate control, so the shares decide how the strips'
   qualities compare.  Shared by encoded lines, a busy bottom half (ground
   under sky) is quantised harder and the seam shows as a step in sharpness:
@@ -191,10 +191,19 @@ slices (`ar9311_merge.c`).  The receiver sees an ordinary 1080p stream.
 
   Only a quarter of the gap closed at 50: the plain top strip did not
   spend its share by lines (sent 20.7 Mbit/s at 0, 21.6 at 100), so taking
-  bits from it hardly coarsened it.  The default stays 0, the split by
-  lines that has been flown; testers try other values from the goggles'
-  menu in developer mode.  The 10 s strips line of the log gives each
-  strip's mean QP and share.
+  bits from it hardly coarsened it.  In flight the cost was smaller: a P1
+  flight (11-27) switched 0 -> 50 -> 100 in the air.
+
+  | stripBalance | QP gap bottom - top (10 s means) | capture->rx median / p90 |
+  | --- | --- | --- |
+  | 0 | 5 - 10 | 23.9 / 27.1 ms |
+  | 50 | 3.4 - 8.6 | 23.5 / 27.5 |
+  | 100 | 0 - 5.6, mostly ~3 | 24.2 / 29.4 |
+
+  At 0 the step in sharpness at the seam was plain to see on the goggles,
+  so 100 is the default.  Other values are on the goggles' menu in
+  developer mode.  The 10 s strips line of the log gives each strip's mean
+  QP and share.
 - **Join**: strip 0's SPS gets the full height; the other strips' VPS/SPS/PPS
   are dropped after a check that they match strip 0's, and each slice
   header is rewritten to first_slice_segment_in_pic_flag 0 and its CTU

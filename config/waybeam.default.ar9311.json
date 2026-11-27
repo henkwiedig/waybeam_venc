@@ -16,7 +16,7 @@
     "subFrameSync": true,
     "strips": 2,
     "stripOverlap": 1,
-    "stripBalance": 0,
+    "stripBalance": 100,
     "resilience": "racing",
     "framing": "off"
   },

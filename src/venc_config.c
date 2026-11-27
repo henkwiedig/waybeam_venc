@@ -184,7 +184,7 @@ void venc_config_defaults(VencConfig *cfg)
 	cfg->video0.sub_frame_sync = false;
 	cfg->video0.strips = 0;
 	cfg->video0.strip_overlap = 1;
-	cfg->video0.strip_balance = 0;
+	cfg->video0.strip_balance = 100;
 
 	/* intra refresh (video0) — disabled by default; mode-driven */
 	safe_strcpy(cfg->video0.intra_refresh_mode,

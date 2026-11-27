@@ -1,5 +1,22 @@
 # History
 
+## [0.101.1] - 2026-11-27
+
+AR9311: **the strips are balanced by quality by default**
+(`video0.stripBalance` 100, was 0).  No contract change.
+
+- **Why.**  In a P1 flight (11-27, ~12-20 Mbit/s) the two strip encoders
+  ran 5-10 QP apart at 0: the sky strip at QP ~17 wasting its share by
+  lines, the ground strip at 27-37.  On the goggles that showed as a plain
+  step in sharpness at the seam.  Switched to 50 and 100 in the same
+  flight, the gap fell to 3.4-8.6 and mostly ~3 (0-5.6).
+- **Cost.**  Latency, as bits move into the strip sent last: capture -> rx
+  median 23.9 / 23.5 / 24.2 ms and p90 27.1 / 27.5 / 29.4 ms at 0 / 50 /
+  100 in that flight, against 22.4 / 23.6 / 26.2 ms on the bench at 22
+  Mbit/s with a busy bottom.
+- Both default configs and the default for a config without the key are
+  100.  A saved `/etc/waybeam.json` keeps its value.
+
 ## [0.101.0] - 2026-11-24
 
 AR9311: **the bitrate floor drops from 1000 to 500, and frame decimation

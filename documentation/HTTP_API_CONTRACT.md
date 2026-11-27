@@ -116,7 +116,7 @@ Response `200`:
 {
   "ok": true,
   "data": {
-    "app_version": "0.101.0",
+    "app_version": "0.101.1",
     "contract_version": "0.44.0",
     "config_schema_version": "1.0.0",
     "backend": "star6e"
@@ -797,7 +797,7 @@ curl "http://<device-ip>/api/v1/live/set?video0.maxFramePct=150"
 - A value the strip layout cannot take (a middle strip whose height is not a multiple of the overlap) logs a warning and encodes one picture; at 1080p every strip count takes 0..2.
 - `supported:false` on Star6E, Maruko and CV610.
 
-`video0.stripBalance` (`video0.strip_balance`; uint, `0`..`100`, default `0`; restart-required, persisted) is the share, in percent, of the quality gap between the strips that the bitrate closes. Every strip has an encoder and a rate control of its own; shared by the lines each encodes, the strip with the busier picture (the ground below the sky) is quantised harder and the seam shows as a step in sharpness (P1 flight, ~12 Mbit/s: slice QP 29 above the seam, 37 below). Every half second waybeam compares the strips' slice QPs and moves bitrate toward the coarser strip; `video0.bitrate` stays the total.
+`video0.stripBalance` (`video0.strip_balance`; uint, `0`..`100`, default `100` since 0.101.1, `0` before; restart-required, persisted) is the share, in percent, of the quality gap between the strips that the bitrate closes. Every strip has an encoder and a rate control of its own; shared by the lines each encodes, the strip with the busier picture (the ground below the sky) is quantised harder and the seam shows as a step in sharpness (P1 flight, ~12 Mbit/s: slice QP 29 above the seam, 37 below). Every half second waybeam compares the strips' slice QPs and moves bitrate toward the coarser strip; `video0.bitrate` stays the total.
 
 - `0` (the default) shares by lines, as before 0.43.0. `100` brings the strips' QPs together; `50` aims at half the gap, assuming a strip's QP moves 6 per halving of its bits (a plain strip that does not spend its share moves less, so less of the gap closes).
 - **Cost: latency.** The last strip is sent after the camera has finished, the others while it is still writing, so bits moved into the last strip delay the picture by their time on the radio. Measured on a P1 bench at 22 Mbit/s, plain top and busy bottom, capture -> goggles: `0` 22.4 ms (QP 19.9/24.2), `50` 23.6 ms (20.4/23.6), `100` 26.2 ms (22.0/22.5).
